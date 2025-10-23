@@ -1,0 +1,101 @@
+/******************************************************************************/
+/*
+ * File:    styles_mobile.css
+ * Author:  Luke de Munk
+ * Version: 0.9.0
+ * 
+ * Brief:   Additional styles for mobile version.
+ *
+ *          More information:
+ *          https://github.com/LukedeMunk/zyrax-home-main-controller
+ */
+/******************************************************************************/
+/* #region Base elements */
+body {
+    -webkit-text-size-adjust: none;
+    font-size: 10px;
+}
+
+p {
+    font-size: 12px;
+}
+
+i {
+    font-size: 13px;
+}
+
+nav i {
+    font-size: 20px;
+}
+
+th, td {
+    font-size: 10px;
+}
+
+.page {
+    left: 5%;
+    width: 90%;
+}
+
+.wrap-form {
+    padding: 50px 10px;
+    margin-bottom: 30px !important;
+}
+
+.flex {
+    flex-direction: column;
+    margin: auto;
+    align-items: center;
+}
+
+.banner {
+    margin: auto;
+    width: 85%;
+}
+
+.half-width {
+    width: 90% !important;
+}
+
+select {
+    appearance: none;
+    height: 30px !important;
+    min-height: 30px !important;
+    -webkit-appearance: menulist-button; /* For iOS compatibility */
+}
+
+fieldset {
+    width: 100%;
+}
+
+.navigation-item-title {
+    display: none;
+}
+
+nav i {
+    font-size: 20px;
+}
+
+.banner-stack {
+    right: 50%;
+    transform: translateX(50%);
+    width: 90%;
+}
+
+.popup-container {
+    width: 80%;
+}
+/* #endregion */
+
+/* #region Custom mobile styles */
+.big-modal {
+    width: 100%;
+}
+
+.small-bottom-modal {
+    width: 98%;
+    min-width: 200px;
+    padding-bottom: 25px;
+    bottom: -20px;
+}
+/* #endregion */
