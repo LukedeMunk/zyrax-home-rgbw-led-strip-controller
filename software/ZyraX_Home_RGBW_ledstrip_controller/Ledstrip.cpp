@@ -2969,6 +2969,16 @@ String Ledstrip::getPixels() {
 
 /******************************************************************************/
 /*!
+  @brief    Returns a list of pixel values. Hex values.XXXXX
+  @returns  String              JSON string of pixel values
+*/
+/******************************************************************************/
+const CRGB* Ledstrip::getPixelColors() const {
+    return _leds;
+}
+
+/******************************************************************************/
+/*!
   @brief    Returns the power state of the ledstrip.
   @returns  bool                True if strip is on.
 */

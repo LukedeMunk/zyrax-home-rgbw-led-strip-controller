@@ -18,7 +18,7 @@
 #include "CommandQueue.h"                                                       //For asynchronous execution of commands
 #include "MemoryManager.h"                                                      //For managing files on the SD card
 #include "UpdateManager.h"                                                      //For updating the firmware
-#include "esp_mac.h"                                                            //For generating a unique network config AP name based on MAC
+#include "esp_mac.h"                                                            //For generating a unique network configuration AP name based on MAC
 #include "Ticker.h"                                                             //For asynchronous delays and intervals
 #include "ArduinoJson.h"                                                        //For JSON functionality
 #include "SecurityManager.h"                                                    //For encrypting/decrypting and hashing functionality
@@ -39,6 +39,7 @@ bool doorStateChanged = false;
 Ticker rebootDelay;
 
 AsyncWebServer server(80);
+AsyncWebSocket webSocket("/ws");
 Ledstrip strip;
 
 TaskHandle_t _taskHandler = NULL;
@@ -137,10 +138,16 @@ void setup() {
   @brief    Initializes the local wired sensor.
 */
 /******************************************************************************/
-void initializeSensor() {
+void initializeSensor() {//TODO when inverted, pulldown?
     if (sensorModel == SENSOR_MODEL_CONTACT_SWITCH) {
-        pinMode(LOCAL_SENSOR1_PIN, INPUT_PULLUP);
-        pinMode(LOCAL_SENSOR2_PIN, INPUT_PULLUP);
+        l.logd("initializeSensor");
+        //if (sensorInverted) {
+        //    pinMode(LOCAL_SENSOR1_PIN, INPUT_PULLDOWN);
+        //    pinMode(LOCAL_SENSOR2_PIN, INPUT_PULLDOWN);
+        //} else {
+            pinMode(LOCAL_SENSOR1_PIN, INPUT_PULLUP);
+            pinMode(LOCAL_SENSOR2_PIN, INPUT_PULLUP);
+        //}
     }
 }
 
@@ -154,6 +161,29 @@ void loop() {
         checkSensor();
     }
 }
+/*
+void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+                        AwsEventType type, void *arg,
+                        uint8_t *data, size_t len) {
+    if (type == WS_EVT_CONNECT) {
+        Serial.printf("Client %u connected\n", client->id());
+        client->text("Hallo van ESP32-S3!");
+        const CRGB* leds = strip.getPixelColors();
+        client->binary((uint8_t*)leds, strip.getNumberOfLeds() * 3); // 3 bytes per LED
+    } 
+    else if (type == WS_EVT_DISCONNECT) {
+        Serial.printf("Client %u disconnected\n", client->id());
+    } 
+    else if (type == WS_EVT_DATA) {
+        AwsFrameInfo *info = (AwsFrameInfo*)arg;
+        if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+            String msg = String((char*)data).substring(0, len);
+            Serial.printf("Ontvangen van client %u: %s\n", client->id(), msg.c_str());
+            client->text("Ontvangen: " + msg); // stuur antwoord terug
+        }
+    }
+}*/
+
 
 #pragma region Endpoint functions
 /******************************************************************************/
@@ -185,6 +215,7 @@ void setConfiguration(AsyncWebServerRequest *request) {
     const char* neededParameters[] = {
                                         "id",
                                         "hostname",
+                                        "date_time",
                                         "power_animation",
                                         "model_id",
                                         "led_addresses",
@@ -194,7 +225,7 @@ void setConfiguration(AsyncWebServerRequest *request) {
                                         "sensor_model"
                                     };
 
-    if (!checkPostParameters(request, neededParameters, 9, false)) {
+    if (!checkPostParameters(request, neededParameters, 10, false)) {
         return;
     }
 
@@ -226,6 +257,14 @@ void setConfiguration(AsyncWebServerRequest *request) {
         }
     }
 
+    /* If datetime is specified, set datetime */
+    if (request->hasParam("date_time", true)) {
+        currentDateTime.setDateTime(request->getParam("date_time", true)->value());
+        currentDateTime.getWeek();
+
+        l.logd("Setted datetime to [" + currentDateTime.toDateTimeString() + "]");
+    }
+
     if (request->hasParam("power_animation", true)) {
         l.logd("power_animation: " + request->getParam("power_animation", true)->value());
         uint8_t powerAnimation = (uint8_t) atoi(request->getParam("power_animation", true)->value().c_str());
@@ -240,6 +279,7 @@ void setConfiguration(AsyncWebServerRequest *request) {
             nvMemory.begin(NV_MEM_CONFIG);
             nvMemory.putBool("sensorEnabled", enabled);
             nvMemory.end();
+            initializeSensor();
         }
     }
 
@@ -261,7 +301,7 @@ void setConfiguration(AsyncWebServerRequest *request) {
             nvMemory.begin(NV_MEM_CONFIG);
             nvMemory.putUChar("sensorModel", model);
             nvMemory.end();
-            needsRestart = true;
+            initializeSensor();
         }
     }
 
@@ -460,130 +500,149 @@ void configureMode(AsyncWebServerRequest *request) {
 
     ModeParameters parameters;
     
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_MIN_COLOR_POS)) {
-        if (!request->hasParam(PARAMETER_NAME_MIN_COLOR_POS, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_MIN_COLOR_POS));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_COLOR_RANGE)) {
+        if (!request->hasParam(String(PARAMETER_ID_COLOR_RANGE), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_COLOR_RANGE));
         } else {
-            parameters.minColorPos = (uint8_t) atoi(request->getParam(PARAMETER_NAME_MIN_COLOR_POS, true)->value().c_str());
+            l.logd(String(request->getParam(String(PARAMETER_ID_COLOR_RANGE), true)->value()));
+            JsonDocument jsonParser;
+
+            DeserializationError error = deserializeJson(
+                jsonParser,
+                request->getParam(String(PARAMETER_ID_COLOR_RANGE), true)->value()
+            );
+
+            if (error) {
+                l.logw("JSON parse error");
+                l.logd(String(request->getParam(String(PARAMETER_ID_COLOR_RANGE), true)->value()));
+            } else {
+                parameters.minColorPos = jsonParser[0].as<uint8_t>();
+                parameters.maxColorPos = jsonParser[1].as<uint8_t>();
+            }
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_MAX_COLOR_POS)) {
-        if (!request->hasParam(PARAMETER_NAME_MAX_COLOR_POS, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_MAX_COLOR_POS));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_COLOR1)) {
+        if (!request->hasParam(String(PARAMETER_ID_COLOR1), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_COLOR1));
         } else {
-            parameters.maxColorPos = (uint8_t) atoi(request->getParam(PARAMETER_NAME_MAX_COLOR_POS, true)->value().c_str());
+            JsonDocument jsonParser;
+
+            DeserializationError error = deserializeJson(
+                jsonParser,
+                request->getParam(String(PARAMETER_ID_COLOR1), true)->value()
+            );
+
+            if (error) {
+                l.logw("JSON parse error");
+                l.logd(String(request->getParam(String(PARAMETER_ID_COLOR1), true)->value()));
+            } else {
+                parameters.color1 = hexStringToRGB(jsonParser[0].as<const char*>());
+                parameters.useGradient1 = jsonParser[1].as<bool>();
+            }
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_COLOR1)) {
-        if (!request->hasParam(PARAMETER_NAME_COLOR1, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_COLOR1));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_COLOR2)) {
+        if (!request->hasParam(String(PARAMETER_ID_COLOR2), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_COLOR2));
         } else {
-            parameters.color1 = hexStringToRGB(request->getParam(PARAMETER_NAME_COLOR1, true)->value().c_str());
+            JsonDocument jsonParser;
+
+            DeserializationError error = deserializeJson(
+                jsonParser,
+                request->getParam(String(PARAMETER_ID_COLOR2), true)->value()
+            );
+
+            if (error) {
+                l.logw("JSON parse error");
+                l.logd(String(request->getParam(String(PARAMETER_ID_COLOR2), true)->value()));
+            } else {
+                parameters.color2 = hexStringToRGB(jsonParser[0].as<const char*>());
+                parameters.useGradient2 = jsonParser[1].as<bool>();
+            }
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_COLOR2)) {
-        if (!request->hasParam(PARAMETER_NAME_COLOR2, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_COLOR2));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_SEGMENT_SIZE)) {
+        if (!request->hasParam(String(PARAMETER_ID_SEGMENT_SIZE), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_SEGMENT_SIZE));
         } else {
-            parameters.color2 = hexStringToRGB(request->getParam(PARAMETER_NAME_COLOR2, true)->value().c_str());
+            parameters.segmentSize = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_SEGMENT_SIZE), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_USE_GRADIENT1)) {
-        if (!request->hasParam(PARAMETER_NAME_USE_GRADIENT1, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_USE_GRADIENT1));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_TAIL_LENGTH)) {
+        if (!request->hasParam(String(PARAMETER_ID_TAIL_LENGTH), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_TAIL_LENGTH));
         } else {
-            parameters.useGradient1 = (bool) atoi(request->getParam(PARAMETER_NAME_USE_GRADIENT1, true)->value().c_str());
+            parameters.tailLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_TAIL_LENGTH), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_USE_GRADIENT2)) {
-        if (!request->hasParam(PARAMETER_NAME_USE_GRADIENT2, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_USE_GRADIENT2));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_WAVE_LENGTH)) {
+        if (!request->hasParam(String(PARAMETER_ID_WAVE_LENGTH), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_WAVE_LENGTH));
         } else {
-            parameters.useGradient2 = (bool) atoi(request->getParam(PARAMETER_NAME_USE_GRADIENT2, true)->value().c_str());
+            parameters.waveLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_WAVE_LENGTH), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_SEGMENT_SIZE)) {
-        if (!request->hasParam(PARAMETER_NAME_SEGMENT_SIZE, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_SEGMENT_SIZE));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_TIME_FADE)) {
+        if (!request->hasParam(String(PARAMETER_ID_TIME_FADE), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_TIME_FADE));
         } else {
-            parameters.segmentSize = (uint8_t) atoi(request->getParam(PARAMETER_NAME_SEGMENT_SIZE, true)->value().c_str());
+            parameters.timeFade = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_TIME_FADE), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_TAIL_LENGTH)) {
-        if (!request->hasParam(PARAMETER_NAME_TAIL_LENGTH, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_TAIL_LENGTH));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DELAY)) {
+        if (!request->hasParam(String(PARAMETER_ID_DELAY), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DELAY));
         } else {
-            parameters.tailLength = (uint8_t) atoi(request->getParam(PARAMETER_NAME_TAIL_LENGTH, true)->value().c_str());
+            parameters.delay = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_DELAY), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_WAVE_LENGTH)) {
-        if (!request->hasParam(PARAMETER_NAME_WAVE_LENGTH, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_WAVE_LENGTH));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DELAY_BETWEEN)) {
+        if (!request->hasParam(String(PARAMETER_ID_DELAY_BETWEEN), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DELAY_BETWEEN));
         } else {
-            parameters.waveLength = (uint8_t) atoi(request->getParam(PARAMETER_NAME_WAVE_LENGTH, true)->value().c_str());
+            parameters.delayBetween = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_DELAY_BETWEEN), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_TIME_FADE)) {
-        if (!request->hasParam(PARAMETER_NAME_TIME_FADE, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_TIME_FADE));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_RANDOMNESS_DELAY)) {
+        if (!request->hasParam(String(PARAMETER_ID_RANDOMNESS_DELAY), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_RANDOMNESS_DELAY));
         } else {
-            parameters.timeFade = (uint16_t) atoi(request->getParam(PARAMETER_NAME_TIME_FADE, true)->value().c_str());
+            parameters.randomnessDelay = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_RANDOMNESS_DELAY), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_DELAY)) {
-        if (!request->hasParam(PARAMETER_NAME_DELAY, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_DELAY));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_INTENSITY)) {
+        if (!request->hasParam(String(PARAMETER_ID_INTENSITY), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_INTENSITY));
         } else {
-            parameters.delay = (uint16_t) atoi(request->getParam(PARAMETER_NAME_DELAY, true)->value().c_str());
+            parameters.intensity = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_INTENSITY), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_DELAY_BETWEEN)) {
-        if (!request->hasParam(PARAMETER_NAME_DELAY_BETWEEN, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_DELAY_BETWEEN));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DIRECTION)) {
+        if (!request->hasParam(String(PARAMETER_ID_DIRECTION), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DIRECTION));
         } else {
-            parameters.delayBetween = (uint16_t) atoi(request->getParam(PARAMETER_NAME_DELAY_BETWEEN, true)->value().c_str());
+            parameters.direction = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_DIRECTION), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_RANDOMNESS_DELAY)) {
-        if (!request->hasParam(PARAMETER_NAME_RANDOMNESS_DELAY, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_RANDOMNESS_DELAY));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_NUMBER_OF_ELEMENTS)) {
+        if (!request->hasParam(String(PARAMETER_ID_NUMBER_OF_ELEMENTS), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_NUMBER_OF_ELEMENTS));
         } else {
-            parameters.randomnessDelay = (uint8_t) atoi(request->getParam(PARAMETER_NAME_RANDOMNESS_DELAY, true)->value().c_str());
+            parameters.numberOfElements = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_NUMBER_OF_ELEMENTS), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_INTENSITY)) {
-        if (!request->hasParam(PARAMETER_NAME_INTENSITY, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_INTENSITY));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_PALETTE)) {
+        if (!request->hasParam(String(PARAMETER_ID_PALETTE), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_PALETTE));
         } else {
-            parameters.intensity = (uint8_t) atoi(request->getParam(PARAMETER_NAME_INTENSITY, true)->value().c_str());
+            parameters.palette = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_PALETTE), true)->value().c_str());
         }
     }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_DIRECTION)) {
-        if (!request->hasParam(PARAMETER_NAME_DIRECTION, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_DIRECTION));
+    if (memoryManager.modeHasParameter(mode, PARAMETER_ID_FADE_LENGTH)) {
+        if (!request->hasParam(String(PARAMETER_ID_FADE_LENGTH), true)) {
+            l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_FADE_LENGTH));
         } else {
-            parameters.direction = (uint8_t) atoi(request->getParam(PARAMETER_NAME_DIRECTION, true)->value().c_str());
-        }
-    }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_NUMBER_OF_ELEMENTS)) {
-        if (!request->hasParam(PARAMETER_NAME_NUMBER_OF_ELEMENTS, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_NUMBER_OF_ELEMENTS));
-        } else {
-            parameters.numberOfElements = (uint8_t) atoi(request->getParam(PARAMETER_NAME_NUMBER_OF_ELEMENTS, true)->value().c_str());
-        }
-    }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_PALETTE)) {
-        if (!request->hasParam(PARAMETER_NAME_PALETTE, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_PALETTE));
-        } else {
-            parameters.palette = (uint8_t) atoi(request->getParam(PARAMETER_NAME_PALETTE, true)->value().c_str());
-        }
-    }
-    if (memoryManager.modeHasParameter(mode, PARAMETER_NAME_FADE_LENGTH)) {
-        if (!request->hasParam(PARAMETER_NAME_FADE_LENGTH, true)) {
-            l.logw("Missing mode configuration parameter: " + String(PARAMETER_NAME_FADE_LENGTH));
-        } else {
-            parameters.fadeLength = (uint8_t) atoi(request->getParam(PARAMETER_NAME_FADE_LENGTH, true)->value().c_str());
+            parameters.fadeLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_FADE_LENGTH), true)->value().c_str());
         }
     }
 
@@ -710,17 +769,18 @@ void checkSensor() {
     bool pinState1 = !digitalRead(LOCAL_SENSOR1_PIN);
     bool pinState2 = !digitalRead(LOCAL_SENSOR2_PIN);
 
+    bool newDoorState = pinState1 || pinState2;
+
     if (sensorInverted) {
-        pinState1 = !pinState1;
-        pinState2 = !pinState2;
+        newDoorState = !newDoorState;
     }
 
     /* Don't take action when is the same */
-    if (localDoorState == (pinState1 | pinState2)) {
+    if (localDoorState == newDoorState) {
         return;
     }
 
-    localDoorState = pinState1 | pinState2;
+    localDoorState = newDoorState;
     
     if (localDoorState) {
         l.logi("Local door opened");

@@ -16,6 +16,7 @@
 #include "stdint.h"                                                             //For size defined int types
 #include "WiFi.h"                                                               //For IPAddress type
 #include "FastLED.h"                                                            //For CRGB color class
+#include "DateTime.h"                                                           //For system date and time (global configuration variable)
 
 
 #pragma region Pins
@@ -150,11 +151,11 @@
 #define MODE_TEMPLATE_10                26
 //#define SUNRISE                       12
 //#define SUNSET                        13
-#define MODE_DRAWING                    50
+#define MODE_DRAWING                    100
 
 /* System modes */
-#define SYSTEM_MODE_PULSES              100
-#define SYSTEM_MODE_ALARM               101
+#define SYSTEM_MODE_PULSES              200
+#define SYSTEM_MODE_ALARM               201
 
 #define NUM_MODES                       17                                      //Just add up num of modes + 1 because ID starts with 1 on master controller MINUS SYSTEM modes
 
@@ -176,26 +177,23 @@
 #define _WAIT_FOR_DOOR_CLOSED           10
 
 
-#define PARAMETER_NAME_MIN_COLOR_POS    "min_color_pos"
-#define PARAMETER_NAME_MAX_COLOR_POS    "max_color_pos"
-#define PARAMETER_NAME_COLOR1           "color1"
-#define PARAMETER_NAME_COLOR2           "color2"
-#define PARAMETER_NAME_USE_GRADIENT1    "use_gradient1"
-#define PARAMETER_NAME_USE_GRADIENT2    "use_gradient2"
-#define PARAMETER_NAME_SEGMENT_SIZE     "segment_size"
-#define PARAMETER_NAME_TAIL_LENGTH      "tail_length"
-#define PARAMETER_NAME_WAVE_LENGTH      "wave_length"
-#define PARAMETER_NAME_TIME_FADE        "time_fade"                 //Todo change to fade delay
-#define PARAMETER_NAME_DELAY            "delay"
-#define PARAMETER_NAME_DELAY_BETWEEN    "delay_between"
-#define PARAMETER_NAME_RANDOMNESS_DELAY "randomness_delay"
-#define PARAMETER_NAME_INTENSITY        "intensity"
-#define PARAMETER_NAME_DIRECTION        "direction"
-#define PARAMETER_NAME_NUMBER_OF_ELEMENTS   "number_of_elements"
-#define PARAMETER_NAME_PALETTE              "palette"
-#define PARAMETER_NAME_FADE_LENGTH          "fade_length"           //Todo change to fade delay
+#define PARAMETER_ID_COLOR_RANGE        1
+#define PARAMETER_ID_COLOR1             2
+#define PARAMETER_ID_COLOR2             3
+#define PARAMETER_ID_SEGMENT_SIZE       4
+#define PARAMETER_ID_TAIL_LENGTH        5
+#define PARAMETER_ID_WAVE_LENGTH        6
+#define PARAMETER_ID_TIME_FADE          7//Todo change to fade delay
+#define PARAMETER_ID_DELAY              8
+#define PARAMETER_ID_DELAY_BETWEEN      9
+#define PARAMETER_ID_RANDOMNESS_DELAY   10
+#define PARAMETER_ID_INTENSITY          11
+#define PARAMETER_ID_DIRECTION          12
+#define PARAMETER_ID_NUMBER_OF_ELEMENTS 13
+#define PARAMETER_ID_PALETTE            14
+#define PARAMETER_ID_FADE_LENGTH        15//Todo change to fade delay
 
-#define NUMBER_OF_MODE_PARAMETERS       18
+#define NUMBER_OF_MODE_PARAMETERS       14
 #define MAX_SEGMENT_SIZE                21
 
 #define PALETTE_RANDOM                  0
@@ -252,5 +250,6 @@ struct ModeParameters {
 
 #pragma region Variables
 inline uint16_t _numberOfLogs;
+inline DateTime currentDateTime;
 #pragma endregion
 #endif

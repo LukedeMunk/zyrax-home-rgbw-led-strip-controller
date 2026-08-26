@@ -197,10 +197,10 @@ String Logger::generateJsonLog(uint8_t type, const char* log) {
     String date;
     String time;
     
-    //if (currentDateTime.isConfigured()) {
-    //    date = currentDateTime.toDateString();
-    //    time = currentDateTime.toTimeString();
-    //}
+    if (currentDateTime.isConfigured()) {
+        date = currentDateTime.toDateString();
+        time = currentDateTime.toTimeString();
+    }
 
     String jsonLog = "{\"type\":";
     jsonLog += String(type) + ",";

@@ -34,7 +34,6 @@
 #define MAX_BRIGHTNESS                  180
 #define MAX_NUMBER_LEDS                 250
 
-
 /* Network credentials */
 #define NETWORK_CONFIG_AP_SSID          "Config network ESP32_"
 #define AP_PASSWORD                     "NetworkConfig!"

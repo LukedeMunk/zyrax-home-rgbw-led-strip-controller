@@ -40,11 +40,11 @@ class MemoryManager {
         bool copyFile(String filePath, String copyPath);
         String joinPaths(String path1, String path2, String path3="");
         uint32_t rgbToHex(CRGB color);
-        bool modeHasParameter(uint8_t mode, String parameterName);
+        bool modeHasParameter(uint8_t mode, uint8_t parameterId);
         uint8_t getnumberOfModeParameters(uint8_t mode);
         
     private:
-        String _generateModeParameterJsonString(String parameterName, String parameterValue, bool isString=false);
+        String _generateModeParameterJsonString(uint8_t parameterId, String parameterValue1, bool isString1=false, String parameterValue2="");
         bool _checkFileSystemStructure();
         bool _checkDirectory(String directory);
         bool _checkFile(String filePath, String defaultFilePath = "");

@@ -87,6 +87,7 @@ class Ledstrip {
     uint8_t getState();
     String getPixelAddressing();
     String getPixels();
+    const CRGB* getPixelColors() const;
     uint16_t getNumberOfLeds();
     uint8_t getDriver();
     bool getPower();
