@@ -95,6 +95,7 @@
 
 #pragma region Defaults
 #define DEFAULT_VERSION                 "v0.0.0"
+#define DEFAULT_UPDATE_VERSION          "0_0_0"
 #define DEFAULT_IP                      "0.0.0.0"
 #define DEFAULT_ID                      255
 #pragma endregion
@@ -104,7 +105,7 @@
 #pragma endregion
 
 #pragma region Others
-#define MAX_BRIGHTNESS                  255                                     //Duty cycle is same as brightness
+#define MAX_BRIGHTNESS                  180                                     //Maximum configured LED brightness
 
 #define BYTES_IN_KBYTE                  1024
 #define FILE_CHUNK_SIZE                 32*BYTES_IN_KBYTE                       //32kB buffer
@@ -152,12 +153,14 @@
 //#define SUNRISE                       12
 //#define SUNSET                        13
 #define MODE_DRAWING                    100
+#define COMMAND_CONFIGURE_MODE          4
 
 /* System modes */
 #define SYSTEM_MODE_PULSES              200
 #define SYSTEM_MODE_ALARM               201
 
-#define NUM_MODES                       17                                      //Just add up num of modes + 1 because ID starts with 1 on master controller MINUS SYSTEM modes
+#define NUM_MODES                       17                                      //Configured modes shown by the controller
+#define NUM_MODE_PARAMETER_SLOTS        27                                      //Storage for mode IDs 0 through 26
 
 #define _POWER_FADE                     0
 #define _POWER_DISSOLVE                 1
@@ -246,6 +249,24 @@ struct ModeParameters {
 };
 #define MAX_FADE_TIME 100
 #define MAX_WAVE_LENGTH 10
+
+/* LED task safety */
+#define LEDSTRIP_TASK_CORE              1
+#define LEDSTRIP_TASK_PRIORITY          2
+#define LEDSTRIP_TASK_STACK_SIZE        8000
+#define COMMAND_TASK_CORE               0
+#define COMMAND_TASK_PRIORITY           0
+#define COMMAND_TASK_STACK_SIZE         8000
+#define UPDATE_TASK_PRIORITY            1
+#define UPDATE_TASK_STACK_SIZE          8192
+#define TASK_WAIT_TIMEOUT_MS            30000
+#define TASK_WAIT_POLL_MS               1
+#define TASK_RECOVERY_RESTART_DELAY_MS  100
+#define MUTEX_TIMEOUT_MS                100
+#define MIN_MODE_DELAY_MS               1
+#define MAX_MODE_DELAY_MS               60000
+#define MAX_MODE_ELEMENTS               16
+#define MAX_MODE_BUFFER_LEDS            (MAX_NUMBER_LEDS * 2)
 #pragma endregion
 
 #pragma region Variables

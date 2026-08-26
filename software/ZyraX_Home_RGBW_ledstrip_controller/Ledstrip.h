@@ -30,10 +30,7 @@
 #include "Preferences.h"                                                        //For non-volatile memory functionality
 #include "Configuration.h"                                                      //For configuration variables and global constants
 #include "Logger.h"                                                             //For printing and saving logs
-
-
-#define CORE_NUMBER             1
-#define PRIORITY                2
+#include "freertos/semphr.h"
 
 
 class Ledstrip {
@@ -112,7 +109,15 @@ class Ledstrip {
     CRGB _blendColors(CRGB color1, float color1Portion, CRGB color2);
     CRGB _colorWheel(uint8_t position);
     CRGB _getHeatColor(uint8_t temperature, uint8_t pallete);
-    uint8_t _getGradientColorPosition(uint8_t step);
+    uint8_t _getGradientColorPosition(uint16_t step);
+    bool _createTask(const char* taskName);
+    void _delayMode(uint32_t delayMs);
+    bool _lockOperation();
+    void _unlockOperation();
+    bool _isValidMode(uint8_t mode);
+    bool _isConfigurableMode(uint8_t mode);
+    ModeParameters _validateModeParameters(ModeParameters parameters);
+    void _resetPixelAddresses();
 
     /* Modes (threads) */
     void __fade();
@@ -179,6 +184,7 @@ class Ledstrip {
     uint16_t _ledAddresses[MAX_NUMBER_LEDS];
     CRGB _leds[MAX_NUMBER_LEDS];
     CRGB _savedLeds[MAX_NUMBER_LEDS];
+    CRGB _publishedLeds[MAX_NUMBER_LEDS];
 
     CRGB _tempLeds[MAX_NUMBER_LEDS];
     CRGBW _crgbwTempLeds[MAX_NUMBER_LEDS];
@@ -203,16 +209,19 @@ class Ledstrip {
     uint8_t _powerAnimation;
     bool _doorState;
 
-    uint8_t _state;
+    volatile uint8_t _state;
 
     /* Temporary system variables*/
     uint8_t _desiredColorPos;
     bool _fadeToGradientColors;
 
     /* Mode parameters */ 
-    ModeParameters _modeParameters[NUM_MODES]; 
+    ModeParameters _modeParameters[NUM_MODE_PARAMETER_SLOTS];
     
     TaskHandle_t _taskHandler = NULL;                                           //One taskhandler, one task at a time
+    volatile bool _stopRequested = false;
+    SemaphoreHandle_t _operationMutex = NULL;
+    SemaphoreHandle_t _frameMutex = NULL;
 
     Logger _l;
 

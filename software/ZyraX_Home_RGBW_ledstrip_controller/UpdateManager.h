@@ -29,16 +29,6 @@
 
 #define MAX_NUM_POWER_CYCLES            5
 
-#pragma region OTA states
-#define OTA_STATE_IDLE                  0
-#define OTA_STATE_DOWNLOADING_FIRMWARE  1
-#define OTA_STATE_INSTALLING_FIRMWARE   2
-#define OTA_STATE_FINISHED              3
-#define OTA_STATE_WAITING               4
-#pragma endregion
-
-#define DEFAULT_VERSION                 "0_0_0"
-
 class UpdateManager {
     public:
         UpdateManager();

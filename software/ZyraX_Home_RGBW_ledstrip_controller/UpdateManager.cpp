@@ -39,7 +39,7 @@ void UpdateManager::initialize(uint8_t id) {
     /* Get state from non-volatile memory */
     _nvMemory.begin(NV_MEM_CONFIG, true);
     _state = _nvMemory.getUShort("state", OTA_STATE_IDLE);
-    _updateToVersion.setVersion(_nvMemory.getString("updateToVer", DEFAULT_VERSION));
+    _updateToVersion.setVersion(_nvMemory.getString("updateToVer", DEFAULT_UPDATE_VERSION));
     _powerCycles = _nvMemory.getUChar("powerCycles");
     _nvMemory.end();
 
@@ -85,6 +85,11 @@ void UpdateManager::initialize(uint8_t id) {
 */
 /******************************************************************************/
 void UpdateManager::updateSystem(Version version) {
+    if (_taskHandlerUpdateSystem != NULL) {
+        _l.logw("An OTA update task is already running");
+        return;
+    }
+
     _updateToVersion = version;
 
     /* Save version in non-volatile memory */
@@ -93,14 +98,19 @@ void UpdateManager::updateSystem(Version version) {
     _nvMemory.end();
 
     /* Start system update task */
-    xTaskCreate(
+    BaseType_t taskResult = xTaskCreate(
         _dispatchUpdateSystem,                                  	            //Dispatcher or task to call
         "UpdateSystem",                                                         //Task name (max 16 characters)
-        8192,                                                                   //Stack size
+        UPDATE_TASK_STACK_SIZE,                                                 //Stack size
         this,                                                                   //Pointer to this class to use as parameter (for casting later on)
-        1,                                                                      //Priority
+        UPDATE_TASK_PRIORITY,                                                   //Priority
         &_taskHandlerUpdateSystem                                               //With task handle we will be able to manipulate with this task.
     );
+    if (taskResult != pdPASS || _taskHandlerUpdateSystem == NULL) {
+        _taskHandlerUpdateSystem = NULL;
+        _state = OTA_STATE_IDLE;
+        _l.loge("Could not create OTA update task");
+    }
 }
 #pragma endregion
 
@@ -168,6 +178,9 @@ void UpdateManager::_taskUpdateSystem() {
     while (!downloadSuccess && retry < DOWNLOAD_RETRIES) {
         if (_downloadOtaFile()) {
             downloadSuccess = true;
+        } else {
+            retry++;
+            vTaskDelay(pdMS_TO_TICKS(TASK_WAIT_POLL_MS));
         }
     }
 
@@ -183,9 +196,10 @@ void UpdateManager::_taskUpdateSystem() {
         _nvMemory.putUChar("powerCycles", _powerCycles);
         _nvMemory.end();
 
-        _taskHandlerUpdateSystem = NULL;
-        vTaskDelete(_taskHandlerUpdateSystem);
         _sendState();
+        _taskHandlerUpdateSystem = NULL;
+        vTaskDelete(NULL);
+        return;
     }
 
     _l.logi("Files downloaded, installing firmware", false);
@@ -193,7 +207,7 @@ void UpdateManager::_taskUpdateSystem() {
     _installOtaFile();
     
     _taskHandlerUpdateSystem = NULL;
-    vTaskDelete(_taskHandlerUpdateSystem);
+    vTaskDelete(NULL);
 }
 
 /******************************************************************************/
@@ -210,6 +224,10 @@ bool UpdateManager::_downloadOtaFile() {
 
     /* Download and write to file */
     uint8_t* fileBufferPointer = (uint8_t*) malloc(FILE_CHUNK_SIZE);
+    if (fileBufferPointer == NULL) {
+        _l.loge("Could not allocate OTA download buffer");
+        return false;
+    }
     uint8_t* downloadedBufferPointer = fileBufferPointer;
     uint8_t retry = 0;
 
@@ -219,17 +237,14 @@ bool UpdateManager::_downloadOtaFile() {
     url += "?version=" + _updateToVersion.getVersionDottedString();
 
     /* Create HTTPS client for HTTPS download */
-    WiFiClientSecure *client = new WiFiClientSecure;
-    if(!client) {
-        _l.logd("Fail");
-    }
-    client->setInsecure();
+    WiFiClientSecure client;
+    client.setInsecure();
 
     HTTPClient http;
     http.useHTTP10(true);                                                       //Prevent chunked encoding
 
     /* Connect to download server */
-    while (!http.begin(*client, url)) {
+    while (!http.begin(client, url)) {
         retry++;
 
         /* If still has retries left */
@@ -255,7 +270,8 @@ bool UpdateManager::_downloadOtaFile() {
             /* If still has retries left */
             if (retry <= DOWNLOAD_RETRIES) {
                 vTaskDelay(500);                                                //Wait some time to possibly restore the connection
-                continue;                                                       //Try again
+                responseCode = http.GET();                                      //Try again
+                continue;
             }
         }
         
@@ -289,6 +305,7 @@ bool UpdateManager::_downloadOtaFile() {
     if (!file) {
         _l.loge("Cannot create new file");
         http.end();
+        free(fileBufferPointer);
         return false;
     }
     

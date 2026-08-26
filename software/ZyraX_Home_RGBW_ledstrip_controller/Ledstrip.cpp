@@ -43,6 +43,13 @@ Ledstrip::Ledstrip() {
 /******************************************************************************/
 void Ledstrip::initialize() {
     _l.logi("Initializing ledstrip", false);
+
+    _operationMutex = xSemaphoreCreateRecursiveMutex();
+    _frameMutex = xSemaphoreCreateMutex();
+    if (_operationMutex == NULL || _frameMutex == NULL) {
+        _l.logfe("Could not create LED synchronization mutexes");
+        return;
+    }
     
     _nvMemory.begin(NV_MEM_CONFIG);
     _driver = _nvMemory.getUChar("driver", _SK6812);
@@ -51,6 +58,24 @@ void Ledstrip::initialize() {
     _brightness = _nvMemory.getUChar("brightness", MAX_BRIGHTNESS);
     _mode = _nvMemory.getUChar("mode", MODE_COLOR);
     _nvMemory.end();
+
+    if (_numberLeds == 0 || _numberLeds > MAX_NUMBER_LEDS) {
+        _l.logw("Stored LED count is invalid, using maximum LED count");
+        _numberLeds = MAX_NUMBER_LEDS;
+    }
+    if (!_isValidMode(_mode)) {
+        _l.logw("Stored mode is invalid, using color mode");
+        _mode = MODE_COLOR;
+    }
+    if (_driver > _SK6812) {
+        _l.logw("Stored LED driver is invalid, using SK6812");
+        _driver = _SK6812;
+    }
+    if (_powerAnimation >= NUM_POWER_ANIMATIONS) {
+        _l.logw("Stored power animation is invalid, using fade");
+        _powerAnimation = _POWER_FADE;
+    }
+    _brightness = constrain(_brightness, 0, MAX_BRIGHTNESS);
     
     _loadPixelAddresses();
 
@@ -66,7 +91,7 @@ void Ledstrip::initialize() {
         FastLED.addLeds<WS2812B, LEDSTRIP_DATA_PIN, RGB>(_ledsPointer, getRGBWsize(_numberLeds));
     }
     
-    for (uint8_t mode = 1; mode < NUM_MODES; mode++) {
+    for (uint8_t mode = 1; mode < NUM_MODE_PARAMETER_SLOTS; mode++) {
         configureMode(mode, _memoryManager.loadModeParameters(mode), false);
     }
 
@@ -82,7 +107,9 @@ void Ledstrip::initialize() {
 */
 /******************************************************************************/
 void Ledstrip::setPower(bool state, bool startMode) {
+    if (!_lockOperation()) return;
     if (state == _isOn) {
+        _unlockOperation();
         return;
     }
     
@@ -107,6 +134,9 @@ void Ledstrip::setPower(bool state, bool startMode) {
         case _POWER_DUAL_SWEEP:
             _powerDualSweep();
             break;
+        case _POWER_MULTI_SWEEP:
+            _powerMultiSweep();
+            break;
         default:
             break;
     }
@@ -114,6 +144,7 @@ void Ledstrip::setPower(bool state, bool startMode) {
     if (_isOn && startMode) {
         setMode(_mode);
     }
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -123,7 +154,9 @@ void Ledstrip::setPower(bool state, bool startMode) {
 */
 /******************************************************************************/
 void Ledstrip::doorHandler(bool state) {
+    if (!_lockOperation()) return;
     if (state == _doorState) {
+        _unlockOperation();
         return;
     }
     
@@ -135,6 +168,7 @@ void Ledstrip::doorHandler(bool state) {
     } else {
         _handleDoorClosed();
     }
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -202,6 +236,13 @@ void Ledstrip::_handleDoorClosed() {
 */
 /******************************************************************************/
 void Ledstrip::setMode(uint8_t mode) {
+    if (!_lockOperation()) return;
+    if (!_isValidMode(mode)) {
+        _l.loge("Mode not found: " + String(mode));
+        _unlockOperation();
+        return;
+    }
+
     switch (mode) {
         case MODE_COLOR:
             color();
@@ -296,14 +337,15 @@ void Ledstrip::setMode(uint8_t mode) {
             systemAlarm();
             break;
         default:
-            _l.loge("Mode not found");
-            break;
+            _unlockOperation();
+            return;
     }
     
     _mode = mode;
     _nvMemory.begin(NV_MEM_CONFIG);
     _nvMemory.putUChar("mode", mode);
     _nvMemory.end();
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -315,13 +357,24 @@ void Ledstrip::setMode(uint8_t mode) {
 */
 /******************************************************************************/
 void Ledstrip::configureMode(uint8_t mode, ModeParameters parameters, bool save) {
-    _modeParameters[mode] = parameters;
+    if (!_lockOperation()) return;
+    if (!_isConfigurableMode(mode)) {
+        _l.loge("Cannot configure invalid mode: " + String(mode));
+        _unlockOperation();
+        return;
+    }
+
+    if (_mode == mode && _state == _LOOPING) {
+        _waitUntilIdle();
+    }
+    _modeParameters[mode] = _validateModeParameters(parameters);
 
     if (save) {
-        _memoryManager.writeModeParameters(mode, parameters);
+        _memoryManager.writeModeParameters(mode, _modeParameters[mode]);
     }
 
     _l.logd("Configured mode: " + String(mode));
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -331,10 +384,17 @@ void Ledstrip::configureMode(uint8_t mode, ModeParameters parameters, bool save)
 */
 /******************************************************************************/
 void Ledstrip::setPowerAnimation(uint8_t animation) {
+    if (!_lockOperation()) return;
+    if (animation >= NUM_POWER_ANIMATIONS) {
+        _l.loge("Power animation is outside the supported range");
+        _unlockOperation();
+        return;
+    }
     _powerAnimation = animation;
     _nvMemory.begin(NV_MEM_CONFIG);
     _nvMemory.putUChar("pwrAnimation", animation);
     _nvMemory.end();
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -345,18 +405,47 @@ void Ledstrip::setPowerAnimation(uint8_t animation) {
 */
 /******************************************************************************/
 void Ledstrip::setPixelAddressing(String addressesJson, uint16_t numberOfLeds) {
+    if (!_lockOperation()) return;
+    if (numberOfLeds == 0 || numberOfLeds > MAX_NUMBER_LEDS) {
+        _l.loge("LED count is outside the supported range");
+        _unlockOperation();
+        return;
+    }
+
+    JsonDocument jsonParser;
+    DeserializationError error = deserializeJson(jsonParser, addressesJson);
+    if (error || !jsonParser.is<JsonArray>() || jsonParser.size() != numberOfLeds) {
+        _l.loge("LED addressing JSON is invalid");
+        _unlockOperation();
+        return;
+    }
+
+    uint16_t addresses[MAX_NUMBER_LEDS] = {0};
+    uint16_t highestPixelAddress = 0;
+    for (uint16_t i = 0; i < numberOfLeds; i++) {
+        uint32_t address = jsonParser[i].as<uint32_t>();
+        if (address >= MAX_NUMBER_LEDS) {
+            _l.loge("LED address is outside the supported range");
+            _unlockOperation();
+            return;
+        }
+        addresses[i] = (uint16_t) address;
+        if (highestPixelAddress <= address) {
+            highestPixelAddress = address + 1;
+        }
+    }
+
     _nvMemory.begin(NV_MEM_CONFIG);
     _nvMemory.putString("ledAddresses", addressesJson);
     _nvMemory.putUShort("numberLeds", numberOfLeds);
     _nvMemory.end();
         
-    JsonDocument jsonParser;
-
-    deserializeJson(jsonParser, addressesJson);                                 //Convert JSON string to object
-    
-    for (uint16_t i = 0; i < _highestPixelAddress; i++) {
-        _ledAddresses[i] = (uint16_t) jsonParser[i];
+    _numberLeds = numberOfLeds;
+    _highestPixelAddress = highestPixelAddress;
+    for (uint16_t i = 0; i < numberOfLeds; i++) {
+        _ledAddresses[i] = addresses[i];
     }
+    _unlockOperation();
 }
 
 /******************************************************************************/
@@ -366,11 +455,19 @@ void Ledstrip::setPixelAddressing(String addressesJson, uint16_t numberOfLeds) {
 */
 /******************************************************************************/
 void Ledstrip::drawPixels(CRGB leds[]) {
+    if (!_lockOperation()) return;
+    if (_mode != MODE_DRAWING) {
+        _l.logw("Ignoring pixel data outside drawing mode");
+        _unlockOperation();
+        return;
+    }
+    _waitUntilIdle();
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
         _leds[i] = leds[i];
     }
     
     _showLeds();
+    _unlockOperation();
 }
 
 #pragma region Modes
@@ -408,16 +505,7 @@ void Ledstrip::fade() {
     
     _l.logi("Start fade mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority, 1 seems to work just fine for us
-        &_taskHandler,                                                          //Task handle
-        CORE_NUMBER                                                             //Task CPU core, 1 is where usually the Arduino Framework code (setup and loop function) are running,
-                                                                                //core 0 by default runs the Wifi Stack
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -426,13 +514,13 @@ void Ledstrip::fade() {
 */
 /******************************************************************************/
 void Ledstrip::__fade() {
-    while (1) {
+    while (!_stopRequested) {
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             _leds[i] = _colorWheel(_modeParameters[MODE_FADE].colorPosition);
         }
 
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_FADE].delay);
+        _delayMode(_modeParameters[MODE_FADE].delay);
         
         _modeParameters[MODE_FADE].colorPosition++;
     }
@@ -453,15 +541,7 @@ void Ledstrip::gradient() {
 
     _l.logi("Start gradient mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -473,7 +553,7 @@ void Ledstrip::gradient() {
 void Ledstrip::__gradient() {
     int8_t direction = 1;
 
-    while (1) {
+    while (!_stopRequested) {
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             uint8_t colorPosition = _getGradientColorPosition(i);
             _leds[i] = _colorWheel(colorPosition);
@@ -481,7 +561,7 @@ void Ledstrip::__gradient() {
         }
         
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_GRADIENT].delay);
+        _delayMode(_modeParameters[MODE_GRADIENT].delay);
         _modeParameters[MODE_GRADIENT].colorPosition += direction;
         
         if (_modeParameters[MODE_GRADIENT].colorPosition > _modeParameters[MODE_GRADIENT].maxColorPos) {
@@ -512,15 +592,7 @@ void Ledstrip::blink() {
 
     _l.logi("Start blink mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -534,7 +606,7 @@ void Ledstrip::__blink() {
     int8_t colorDirection1 = 1;
     int8_t colorDirection2 = -1;
 
-    while (1) {
+    while (!_stopRequested) {
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             if (_modeParameters[MODE_BLINK].useGradient1) {
                 _leds[i] = _colorWheel((i + colorPosition1) & 255);
@@ -544,7 +616,7 @@ void Ledstrip::__blink() {
         }
 
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_BLINK].delay);
+        _delayMode(_modeParameters[MODE_BLINK].delay);
 
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             if (_modeParameters[MODE_BLINK].useGradient2) {
@@ -555,7 +627,7 @@ void Ledstrip::__blink() {
         }
 
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_BLINK].delay);
+        _delayMode(_modeParameters[MODE_BLINK].delay);
         
         if (_modeParameters[MODE_BLINK].useGradient1) {
             colorPosition1 += colorDirection1;
@@ -592,15 +664,7 @@ void Ledstrip::scan() {
     
     _l.logi("Start scan mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -609,8 +673,8 @@ void Ledstrip::scan() {
 */
 /******************************************************************************/
 void Ledstrip::__scan() {
-    uint16_t padding = _modeParameters[MODE_SCAN].segmentSize + _modeParameters[MODE_SCAN].tailLength;
-    uint16_t segmentLocation = padding;                                         //Padding because there is where the leds will start to shine
+    int32_t padding = _modeParameters[MODE_SCAN].segmentSize + _modeParameters[MODE_SCAN].tailLength;
+    int32_t segmentLocation = padding;                                          //Padding before the visible scan starts
     int8_t segmentDirection = 1;
 
     uint8_t colorPosition1 = 0;
@@ -618,7 +682,7 @@ void Ledstrip::__scan() {
     int8_t colorDirection1 = 1;
     int8_t colorDirection2 = -1;
     
-    while (1) {
+    while (!_stopRequested) {
         /* Draw background */
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             if (_modeParameters[MODE_SCAN].useGradient2) {
@@ -651,22 +715,22 @@ void Ledstrip::__scan() {
             
             tailColor = _blendColors(color1, color1Portion, color2);
             
-            if (segmentDirection == 1 && segmentLocation - padding - _modeParameters[MODE_SCAN].segmentSize - i >= 0) {
-                _leds[segmentLocation - padding - _modeParameters[MODE_SCAN].segmentSize - i] = tailColor;
-            } else if (segmentDirection == -1 && segmentLocation - padding + i < _highestPixelAddress) {
-                _leds[segmentLocation - padding + i] = tailColor;
+            int32_t ledIndex = segmentDirection == 1
+                               ? segmentLocation - padding - _modeParameters[MODE_SCAN].segmentSize - i
+                               : segmentLocation - padding + i;
+            if (ledIndex >= 0 && ledIndex < _highestPixelAddress) {
+                _leds[ledIndex] = tailColor;
             }
         }
         
         /* Draw scan leds */
         for (uint8_t i = 0; i < _modeParameters[MODE_SCAN].segmentSize; i++) {
-            if (segmentLocation - padding - i < 0) {
-                break;
-            }
+            int32_t ledIndex = segmentLocation - padding - i;
+            if (ledIndex < 0 || ledIndex >= _highestPixelAddress) continue;
             if (_modeParameters[MODE_SCAN].useGradient1) {
-                _leds[segmentLocation - padding - i] = _colorWheel((i + colorPosition1) & 255);
+                _leds[ledIndex] = _colorWheel((i + colorPosition1) & 255);
             } else {
-                _leds[segmentLocation - padding - i] = _modeParameters[MODE_SCAN].color1;
+                _leds[ledIndex] = _modeParameters[MODE_SCAN].color1;
             }
         }
         
@@ -684,14 +748,15 @@ void Ledstrip::__scan() {
             }
         }
 
-        /* No need to wait if no scanline has been drawn */
-        for (uint16_t i = 0; i < _highestPixelAddress; i++) {//TODO can be deletd?
-            /* If something is drawn, wait */
+        /* Keep yielding even while the scanline is outside the visible range. */
+        bool isScanlineVisible = false;
+        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             if (_leds[i] != _modeParameters[MODE_SCAN].color2) {
-                vTaskDelay(_modeParameters[MODE_SCAN].delay);
+                isScanlineVisible = true;
                 break;
             }
         }
+        _delayMode(isScanlineVisible ? _modeParameters[MODE_SCAN].delay : MIN_MODE_DELAY_MS);
 
         /* Change directions */
         if (segmentLocation >= _highestPixelAddress + padding*2) {
@@ -725,15 +790,7 @@ void Ledstrip::theater() {
     
     _l.logi("Start theater mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -773,7 +830,7 @@ void Ledstrip::__theater() {
         dotCounter++;
     }
 
-    while (1) {
+    while (!_stopRequested) {
         if (_modeParameters[MODE_THEATER].direction == DIRECTION_LEFT) {
             _rotateLeft();
         } else {
@@ -781,7 +838,7 @@ void Ledstrip::__theater() {
         }
 
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_THEATER].delay);
+        _delayMode(_modeParameters[MODE_THEATER].delay);
     }
 }
 
@@ -802,15 +859,7 @@ void Ledstrip::sine() {
     
     _l.logi("Start sine mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -822,9 +871,8 @@ void Ledstrip::__sine() {
     float speed = 0.1;
     float time = 0;
     float colorPortion;
-    uint16_t ledAddress;
     //_modeParameters[MODE_SINE].waveLength MIN 1 MAX 20 todo
-    while (1) {
+    while (!_stopRequested) {
         if (_modeParameters[MODE_SINE].direction == DIRECTION_LEFT) {
             time += speed;
         } else {
@@ -843,7 +891,7 @@ void Ledstrip::__sine() {
         _modeParameters[MODE_SINE].colorPosition++;
 
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_SINE].delay);
+        _delayMode(_modeParameters[MODE_SINE].delay);
     }
 }
 
@@ -864,15 +912,7 @@ void Ledstrip::bouncingBalls() {
     
     _l.logi("Start bouncingBalls mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -887,13 +927,13 @@ void Ledstrip::__bouncingBalls() {
     const uint8_t START_HEIGHT = 10;
     const float IMPACT_VELOCITY_START = sqrt(-2 * GRAVITY * START_HEIGHT);
    
-    float height[numberOfBalls];
-    float impactVelocity[numberOfBalls];
-    float timeSinceLastBounce[numberOfBalls];
-    uint16_t position[numberOfBalls];
-    uint64_t clockTimeSinceLastBounce[numberOfBalls];
-    float dampening[numberOfBalls];
-    CRGB ballColors[numberOfBalls];
+    float height[MAX_MODE_ELEMENTS];
+    float impactVelocity[MAX_MODE_ELEMENTS];
+    float timeSinceLastBounce[MAX_MODE_ELEMENTS];
+    uint16_t position[MAX_MODE_ELEMENTS];
+    uint64_t clockTimeSinceLastBounce[MAX_MODE_ELEMENTS];
+    float dampening[MAX_MODE_ELEMENTS];
+    CRGB ballColors[MAX_MODE_ELEMENTS];
     
     for (uint8_t i = 0; i < numberOfBalls; i++) {  
         clockTimeSinceLastBounce[i] = millis();
@@ -910,7 +950,7 @@ void Ledstrip::__bouncingBalls() {
         }
     }
 
-    while (1) {
+    while (!_stopRequested) {
         /* Reset leds */
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             _leds[i] = _modeParameters[MODE_BOUNCING_BALLS].color2;
@@ -935,7 +975,10 @@ void Ledstrip::__bouncingBalls() {
         /* Draw balls */
         for (uint8_t i = 0 ; i < numberOfBalls ; i++) {
             for (uint8_t ballPixel = 0; ballPixel < ballSize; ballPixel++) {
-                _leds[position[i] + ballPixel] = ballColors[i];
+                uint16_t ledIndex = position[i] + ballPixel;
+                if (ledIndex < _highestPixelAddress) {
+                    _leds[ledIndex] = ballColors[i];
+                }
             }
         }
        
@@ -961,15 +1004,7 @@ void Ledstrip::dissolve() {
     
     _l.logi("Start dissolve mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -981,15 +1016,15 @@ void Ledstrip::__dissolve() {
     bool colorToggle = false;
     uint16_t randomIndex = 0;
     uint16_t temp = 0;
-    uint16_t indexes[_highestPixelAddress];
+    uint16_t indexes[MAX_NUMBER_LEDS];
     
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
         indexes[i] = i;
     }
         
-    while (1) {
+    while (!_stopRequested) {
         /* Shuffle order on randomized index */
-        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
+        for (uint16_t i = 0; i < _highestPixelAddress && !_stopRequested; i++) {
             randomIndex = random(i, _highestPixelAddress);                      //Generate a random index between i and n, index < i is already randomized
             
             /* Swap elements */
@@ -1002,7 +1037,7 @@ void Ledstrip::__dissolve() {
         float color1Portion = 0;
         CRGB dotColor;
         
-        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
+        for (uint16_t i = 0; i < _highestPixelAddress && !_stopRequested; i++) {
             if (_modeParameters[MODE_DISSOLVE].timeFade == 0) {
                 if (colorToggle) {
                     _leds[indexes[i]] = _modeParameters[MODE_DISSOLVE].color1;
@@ -1010,11 +1045,11 @@ void Ledstrip::__dissolve() {
                     _leds[indexes[i]] = _modeParameters[MODE_DISSOLVE].color2;
                 }
                 _showLeds();
-                vTaskDelay(_modeParameters[MODE_DISSOLVE].delay);
+                _delayMode(_modeParameters[MODE_DISSOLVE].delay);
                 continue;
             }
 
-            for (uint16_t timeStep = 0; timeStep < 100; timeStep++) {
+            for (uint16_t timeStep = 0; timeStep < 100 && !_stopRequested; timeStep++) {
                 if (colorToggle) {
                     color1Portion = (100-timeStep-1) * 1.0 / 100;
                 } else {                  
@@ -1028,12 +1063,12 @@ void Ledstrip::__dissolve() {
                 _leds[indexes[i]] = dotColor;
   
                 _showLeds();
-                vTaskDelay(_modeParameters[MODE_DISSOLVE].timeFade/100);
+                _delayMode(_modeParameters[MODE_DISSOLVE].timeFade/100);
             }
-            vTaskDelay(_modeParameters[MODE_DISSOLVE].delay);
+            _delayMode(_modeParameters[MODE_DISSOLVE].delay);
         }
 
-        vTaskDelay(_modeParameters[MODE_DISSOLVE].delayBetween);
+        _delayMode(_modeParameters[MODE_DISSOLVE].delayBetween);
         colorToggle = !colorToggle;
     }
 }
@@ -1055,15 +1090,7 @@ void Ledstrip::sparkle() {
     
     _l.logi("Start sparkle mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1072,18 +1099,17 @@ void Ledstrip::sparkle() {
 */
 /******************************************************************************/
 void Ledstrip::__sparkle() {
-    uint8_t colorToggle = 0;
     uint16_t randomIndex = 0;
     uint16_t temp = 0;
-    uint16_t indexes[_highestPixelAddress];
+    uint16_t indexes[MAX_NUMBER_LEDS];
     
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
         indexes[i] = i;
     }
     
-    while (1) {    
+    while (!_stopRequested) {    
         /* Shuffle order on randomized index */
-        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
+        for (uint16_t i = 0; i < _highestPixelAddress && !_stopRequested; i++) {
             randomIndex = random(i, _highestPixelAddress);                      //Generate a random index between i and n, index < i is already randomized
             
             /* Swap elements */
@@ -1096,17 +1122,17 @@ void Ledstrip::__sparkle() {
         float color1Portion = 0;
         CRGB dotColor;
         
-        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
+        for (uint16_t i = 0; i < _highestPixelAddress && !_stopRequested; i++) {
             _leds[indexes[i]] = _modeParameters[MODE_SPARKLE].color1;
 
             if (_modeParameters[MODE_SPARKLE].timeFade == 0) {
                 _showLeds();
-                vTaskDelay(_modeParameters[MODE_SPARKLE].delayBetween);
+                _delayMode(_modeParameters[MODE_SPARKLE].delayBetween);
                 _leds[indexes[i]] = _modeParameters[MODE_SPARKLE].color2;
                 continue;
             }
 
-            for (uint16_t timeStep = 0; timeStep < 100; timeStep++) {
+            for (uint16_t timeStep = 0; timeStep < 100 && !_stopRequested; timeStep++) {
                 color1Portion = (100-timeStep-1) * 1.0 / 100;
                 color1Portion = color1Portion / 2;
   
@@ -1115,9 +1141,9 @@ void Ledstrip::__sparkle() {
                 _leds[indexes[i]] = dotColor;
   
                 _showLeds();
-                vTaskDelay(_modeParameters[MODE_SPARKLE].timeFade/100);
+                _delayMode(_modeParameters[MODE_SPARKLE].timeFade/100);
             }
-            vTaskDelay(_modeParameters[MODE_SPARKLE].delayBetween);
+            _delayMode(_modeParameters[MODE_SPARKLE].delayBetween);
         }
     }
 }
@@ -1138,15 +1164,7 @@ void Ledstrip::fireworks() {
     
     _l.logi("Start fireworks mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1155,7 +1173,7 @@ void Ledstrip::fireworks() {
 */
 /******************************************************************************/
 void Ledstrip::__fireworks() {
-    while (1) {
+    while (!_stopRequested) {
         vTaskDelay(1000);
         _showLeds();
     }
@@ -1177,15 +1195,7 @@ void Ledstrip::fire() {
     
     _l.logi("Start fire mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1197,13 +1207,14 @@ void Ledstrip::__fire() {
     const uint8_t COOLING = 120;
     const uint8_t SPARKING = 100;
 
-    uint8_t heat[_highestPixelAddress];
+    uint8_t heat[MAX_NUMBER_LEDS] = {0};
     int cooldown;
+    uint8_t coolingOffset = min(_modeParameters[MODE_FIRE].segmentSize, (uint8_t) (COOLING - 1));
 
-    while (1) {
+    while (!_stopRequested) {
         /* Cool down every cell a little */
         for(uint16_t i = 0; i < _highestPixelAddress; i++) {
-            cooldown = random(0, (((COOLING-_modeParameters[MODE_FIRE].segmentSize) * 10) / _highestPixelAddress) + 2);
+            cooldown = random(0, (((COOLING - coolingOffset) * 10) / _highestPixelAddress) + 2);
             
             if (cooldown > heat[i]) {
                 heat[i] = 0;
@@ -1252,15 +1263,7 @@ void Ledstrip::sweep() {
     
     _l.logi("Start sweep mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1271,17 +1274,15 @@ void Ledstrip::sweep() {
 void Ledstrip::__sweep() {
     float color1Portion = 0;
     uint16_t animationLength = _highestPixelAddress + _modeParameters[MODE_SWEEP].fadeLength;
-    CRGB color1 = _modeParameters[MODE_SWEEP].color1;
-    CRGB color2 = _modeParameters[MODE_SWEEP].color2;
-    CRGB leds1[animationLength];
-    CRGB leds2[animationLength];
+    CRGB leds1[MAX_MODE_BUFFER_LEDS];
+    CRGB leds2[MAX_MODE_BUFFER_LEDS];
     uint8_t colorPosition1 = 0;
     uint8_t colorPosition2 = 255;
     int8_t colorDirection1 = 1;
     int8_t colorDirection2 = -1;
     bool color1Main = false;
 
-    while (1) {
+    while (!_stopRequested) {
         if (_modeParameters[MODE_SWEEP].useGradient1) {
             for (uint16_t i = 0; i < animationLength; i++) {
                 leds1[i] = _colorWheel((i*3 + colorPosition1) & 255);
@@ -1302,23 +1303,24 @@ void Ledstrip::__sweep() {
         }
 
         /* Animate */
-        for (uint16_t i = 0; i < animationLength; i++) {
+        for (uint16_t i = 0; i < animationLength && !_stopRequested; i++) {
             for (uint8_t j = 0; j < _modeParameters[MODE_SWEEP].fadeLength; j++) {
                 color1Portion = (_modeParameters[MODE_SWEEP].fadeLength-j) * 1.0 / _modeParameters[MODE_SWEEP].fadeLength;
                 
-                int16_t ledIndex = i + j - _modeParameters[MODE_SWEEP].fadeLength;
-                if (ledIndex < 0 || ledIndex > _highestPixelAddress) {
+                uint16_t sourceIndex = i + j;
+                int32_t ledIndex = sourceIndex - _modeParameters[MODE_SWEEP].fadeLength;
+                if (sourceIndex >= animationLength || ledIndex < 0 || ledIndex >= _highestPixelAddress) {
                     continue;
                 }
 
                 if (color1Main) {
-                    _leds[ledIndex] = _blendColors(leds1[i + j], color1Portion, leds2[i + j]);
+                    _leds[ledIndex] = _blendColors(leds1[sourceIndex], color1Portion, leds2[sourceIndex]);
                 } else {
-                    _leds[ledIndex] = _blendColors(leds2[i + j], color1Portion, leds1[i + j]);
+                    _leds[ledIndex] = _blendColors(leds2[sourceIndex], color1Portion, leds1[sourceIndex]);
                 }
             }
             _showLeds();
-            vTaskDelay(_modeParameters[MODE_SWEEP].delay);
+            _delayMode(_modeParameters[MODE_SWEEP].delay);
         }
 
         if (_modeParameters[MODE_SWEEP].useGradient1) {
@@ -1335,7 +1337,7 @@ void Ledstrip::__sweep() {
         }
 
         color1Main = !color1Main;
-        vTaskDelay(_modeParameters[MODE_SWEEP].delayBetween);
+        _delayMode(_modeParameters[MODE_SWEEP].delayBetween);
     }
 }
 
@@ -1355,15 +1357,7 @@ void Ledstrip::colorTwinkels() {
     
     _l.logi("Start color twinkel mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1380,7 +1374,6 @@ void Ledstrip::__colorTwinkels() {
 
     CRGBPalette16 currentPalette = CloudColors_p;
     CRGBPalette16 targetPalette = CloudColors_p;
-    _modeParameters[MODE_COLOR_TWINKELS].palette = PALETTE_RANDOM;
     if (_modeParameters[MODE_COLOR_TWINKELS].palette != PALETTE_RANDOM) {
         switch (_modeParameters[MODE_COLOR_TWINKELS].palette) {
             case PALETTE_CLOUD_COLORS:
@@ -1401,7 +1394,7 @@ void Ledstrip::__colorTwinkels() {
         }
     }
 
-    while (1) {
+    while (!_stopRequested) {
         secondHand = (millis() % (_modeParameters[MODE_COLOR_TWINKELS].delayBetween * 4) / 1000);
         
         if (_modeParameters[MODE_COLOR_TWINKELS].palette == PALETTE_RANDOM) {
@@ -1458,15 +1451,7 @@ void Ledstrip::meteorRain() {
     
     _l.logi("Start color meteor mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1478,13 +1463,13 @@ void Ledstrip::__meteorRain() {
     uint8_t meteorSize = _modeParameters[MODE_METEOR_RAIN].segmentSize;
     uint8_t meteorTrailDecay = _modeParameters[MODE_METEOR_RAIN].tailLength;
 
-    while (1) {
+    while (!_stopRequested) {
         /* Reset leds */
         //for (uint16_t i = 0; i < _highestPixelAddress; i++) {
         //    _leds[i] = CRGB(0, 0, 0);
         //}
  
-        for (uint16_t i = 0; i < _highestPixelAddress + meteorTrailDecay; i++) {
+        for (uint16_t i = 0; i < _highestPixelAddress + meteorTrailDecay && !_stopRequested; i++) {
             // fade brightness all LEDs one step
             for(int j = 0; j < _highestPixelAddress; j++) {
                 if (random(10) > 5) {
@@ -1500,10 +1485,10 @@ void Ledstrip::__meteorRain() {
             }
             
             _showLeds();
-            vTaskDelay(_modeParameters[MODE_METEOR_RAIN].delay);
+            _delayMode(_modeParameters[MODE_METEOR_RAIN].delay);
         }
-        //vTaskDelay(_modeParameters[MODE_METEOR_RAIN].delayBetween);
-        //vTaskDelay(_modeParameters[MODE_METEOR_RAIN].randomnessDelay);todo implement randomness delauy
+        //_delayMode(_modeParameters[MODE_METEOR_RAIN].delayBetween);
+        //_delayMode(_modeParameters[MODE_METEOR_RAIN].randomnessDelay);todo implement randomness delauy
     }
 }
 
@@ -1523,15 +1508,7 @@ void Ledstrip::colorWaves() {
     
     _l.logi("Start color waves mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1544,7 +1521,7 @@ void Ledstrip::__colorWaves() {
     CRGBPalette16 targetPalette;
     //TODO implement palette
 
-    while (1) {
+    while (!_stopRequested) {
         uint8_t wave1 = beatsin8(4, 0, 255);                                    //That's the same as beatsin8(9);
         uint8_t wave2 = beatsin8(3, 0, 255);
         uint8_t wave3 = beatsin8(2, 0, 255);
@@ -1588,15 +1565,7 @@ void Ledstrip::modeTemplate1() {
     
     _l.logi("Start MODE_TEMPLATE_1 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1606,7 +1575,7 @@ void Ledstrip::modeTemplate1() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate1() {
 
-    while (1) {
+    while (!_stopRequested) {
 
         _showLeds();
         vTaskDelay(1);
@@ -1629,15 +1598,7 @@ void Ledstrip::modeTemplate2() {
     
     _l.logi("Start MODE_TEMPLATE_2 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1647,9 +1608,9 @@ void Ledstrip::modeTemplate2() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate2() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_2].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_2].delay);
     }
 }
 
@@ -1669,15 +1630,7 @@ void Ledstrip::modeTemplate3() {
     
     _l.logi("Start MODE_TEMPLATE_3 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1687,9 +1640,9 @@ void Ledstrip::modeTemplate3() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate3() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_3].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_3].delay);
     }
 }
 
@@ -1709,15 +1662,7 @@ void Ledstrip::modeTemplate4() {
     
     _l.logi("Start MODE_TEMPLATE_4 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1727,9 +1672,9 @@ void Ledstrip::modeTemplate4() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate4() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_4].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_4].delay);
     }
 }
 
@@ -1749,15 +1694,7 @@ void Ledstrip::modeTemplate5() {
     
     _l.logi("Start MODE_TEMPLATE_5 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1767,9 +1704,9 @@ void Ledstrip::modeTemplate5() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate5() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_5].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_5].delay);
     }
 }
 
@@ -1789,15 +1726,7 @@ void Ledstrip::modeTemplate6() {
     
     _l.logi("Start MODE_TEMPLATE_6 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1807,9 +1736,9 @@ void Ledstrip::modeTemplate6() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate6() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_6].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_6].delay);
     }
 }
 
@@ -1829,15 +1758,7 @@ void Ledstrip::modeTemplate7() {
     
     _l.logi("Start MODE_TEMPLATE_7 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1847,9 +1768,9 @@ void Ledstrip::modeTemplate7() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate7() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_7].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_7].delay);
     }
 }
 
@@ -1869,15 +1790,7 @@ void Ledstrip::modeTemplate8() {
     
     _l.logi("Start MODE_TEMPLATE_8 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1887,9 +1800,9 @@ void Ledstrip::modeTemplate8() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate8() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_8].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_8].delay);
     }
 }
 
@@ -1909,15 +1822,7 @@ void Ledstrip::modeTemplate9() {
     
     _l.logi("Start MODE_TEMPLATE_9 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1927,9 +1832,9 @@ void Ledstrip::modeTemplate9() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate9() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_9].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_9].delay);
     }
 }
 
@@ -1949,15 +1854,7 @@ void Ledstrip::modeTemplate10() {
     
     _l.logi("Start MODE_TEMPLATE_10 mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -1967,9 +1864,9 @@ void Ledstrip::modeTemplate10() {
 /******************************************************************************/
 void Ledstrip::__modeTemplate10() {
     
-    while (1) {
+    while (!_stopRequested) {
         _showLeds();
-        vTaskDelay(_modeParameters[MODE_TEMPLATE_10].delay);
+        _delayMode(_modeParameters[MODE_TEMPLATE_10].delay);
     }
 }
 #pragma endregion
@@ -1995,15 +1892,7 @@ void Ledstrip::systemPulses() {
     
     _l.logi("Start pulses mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -2012,11 +1901,11 @@ void Ledstrip::systemPulses() {
 */
 /******************************************************************************/
 void Ledstrip::__systemPulses() {
-    uint16_t padding = 20;
-    uint16_t segmentLocation = padding;                                         //Padding because there is where the leds will start to shine
+    int32_t padding = 20;
+    int32_t segmentLocation = padding;                                          //Padding before the visible pulse starts
     int8_t segmentDirection = 1;
     
-    while (1) {
+    while (!_stopRequested) {
         /* Draw background */
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
             _leds[i] = CRGB(0,0,0);
@@ -2034,24 +1923,27 @@ void Ledstrip::__systemPulses() {
             
             tailColor = _blendColors(color1, color1Portion, color2);
             
-            if (segmentLocation - padding - i >= 0) {
-                _leds[segmentLocation - padding - i] = tailColor;
+            int32_t leftIndex = segmentLocation - padding - i;
+            int32_t rightIndex = segmentLocation - padding + i;
+            if (leftIndex >= 0 && leftIndex < _highestPixelAddress) {
+                _leds[leftIndex] = tailColor;
             }
-            if (segmentLocation - padding + i < _highestPixelAddress) {
-                _leds[segmentLocation - padding + i] = tailColor;
+            if (rightIndex >= 0 && rightIndex < _highestPixelAddress) {
+                _leds[rightIndex] = tailColor;
             }
         }
         
         _showLeds();
 
-        /* No need to wait if no scanline has been drawn */
+        /* Keep yielding even while the pulse is outside the visible range. */
+        bool isPulseVisible = false;
         for (uint16_t i = 0; i < _highestPixelAddress; i++) {
-            /* If something is drawn, wait */
             if (_leds[i] != color2) {
-                vTaskDelay(50);
+                isPulseVisible = true;
                 break;
             }
         }
+        _delayMode(isPulseVisible ? 50 : MIN_MODE_DELAY_MS);
 
         /* Change directions */
         if (segmentLocation >= _highestPixelAddress + padding*2) {
@@ -2082,15 +1974,7 @@ void Ledstrip::systemAlarm() {
     
     _l.logi("Start alarm mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "ModeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("ModeHandler");
 }
 
 /******************************************************************************/
@@ -2101,7 +1985,7 @@ void Ledstrip::systemAlarm() {
 void Ledstrip::__systemAlarm() {
     uint8_t cycle = 0;
 
-    while (1) {
+    while (!_stopRequested) {
         /* Flash and then wait */
         for (uint8_t flash = 0; flash < 4; flash++) {
             for (uint16_t i = 0; i < _highestPixelAddress; i++) {
@@ -2136,15 +2020,7 @@ void Ledstrip::_powerFade() {
     
     _l.logd("Start powerFade mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "PowerHandler",                                                         //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("PowerHandler");
 }
 
 /******************************************************************************/
@@ -2172,10 +2048,6 @@ void Ledstrip::__powerFade() {
     
     _l.logd("End powerFade mode");
     
-    _state = _READY_TO_RUN;
-    
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -2188,15 +2060,7 @@ void Ledstrip::_powerDissolve() {
     
     _l.logd("Start powerDissolve mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "PowerHandler",                                                         //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("PowerHandler");
 }
 
 /******************************************************************************/
@@ -2207,7 +2071,7 @@ void Ledstrip::_powerDissolve() {
 void Ledstrip::__powerDissolve() {
     uint16_t randomIndex = 0;
     uint16_t temp = 0;
-    uint16_t indexes[_highestPixelAddress];
+    uint16_t indexes[MAX_NUMBER_LEDS];
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
         indexes[i] = i;
     }
@@ -2247,10 +2111,6 @@ void Ledstrip::__powerDissolve() {
 
     _l.logd("End powerDissolve mode");
     
-    _state = _READY_TO_RUN;
-    
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -2263,15 +2123,7 @@ void Ledstrip::_powerSweep() {
     
     _l.logd("Start powerSweep mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "PowerHandler",                                                         //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("PowerHandler");
 }
 
 /******************************************************************************/
@@ -2303,10 +2155,6 @@ void Ledstrip::__powerSweep() {
   
     _l.logd("End powerSweep mode");
     
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -2319,15 +2167,7 @@ void Ledstrip::_powerDualSweep() {
     
     _l.logd("Start powerDualSweep mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "PowerHandler",                                                         //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("PowerHandler");
 }
 
 /******************************************************************************/
@@ -2357,11 +2197,12 @@ void Ledstrip::__powerDualSweep() {
         for (uint8_t j = 0; j < fadeLength; j++) {
             color1Portion = (fadeLength-j) * 1.0 / fadeLength;
 
-            if (_highestPixelAddress-1 - i - j > _highestPixelAddress/2) {
+            int32_t rightIndex = (int32_t) _highestPixelAddress - 1 - i - j;
+            if (rightIndex >= 0 && rightIndex < _highestPixelAddress && rightIndex > _highestPixelAddress / 2) {
                 if (_isOn) {
-                    _leds[_highestPixelAddress-1 - i - j] = _blendColors(_savedLeds[_highestPixelAddress-1 - i - j], color1Portion, CRGB(0, 0, 0));
+                    _leds[rightIndex] = _blendColors(_savedLeds[rightIndex], color1Portion, CRGB(0, 0, 0));
                 } else {
-                    _leds[_highestPixelAddress-1 - i - j] = _blendColors(CRGB(0, 0, 0), color1Portion, _savedLeds[_highestPixelAddress-1 - i - j]);
+                    _leds[rightIndex] = _blendColors(CRGB(0, 0, 0), color1Portion, _savedLeds[rightIndex]);
                 }
             }
         }
@@ -2383,10 +2224,6 @@ void Ledstrip::__powerDualSweep() {
   
     _l.logd("End powerDualSweep mode");
     
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -2399,15 +2236,7 @@ void Ledstrip::_powerMultiSweep() {
     
     _l.logd("Start powerMultiSweep mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "PowerHandler",                                                         //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("PowerHandler");
 }
 
 /******************************************************************************/
@@ -2437,11 +2266,12 @@ void Ledstrip::__powerMultiSweep() {
         for (uint8_t j = 0; j < fadeLength; j++) {
             color1Portion = (fadeLength-j) * 1.0 / fadeLength;
 
-            if (_highestPixelAddress-1 - i - j > _highestPixelAddress/2) {
+            int32_t rightIndex = (int32_t) _highestPixelAddress - 1 - i - j;
+            if (rightIndex >= 0 && rightIndex < _highestPixelAddress && rightIndex > _highestPixelAddress / 2) {
                 if (_isOn) {
-                    _leds[_highestPixelAddress-1 - i - j] = _blendColors(_savedLeds[_highestPixelAddress-1 - i - j], color1Portion, CRGB(0, 0, 0));
+                    _leds[rightIndex] = _blendColors(_savedLeds[rightIndex], color1Portion, CRGB(0, 0, 0));
                 } else {
-                    _leds[_highestPixelAddress-1 - i - j] = _blendColors(CRGB(0, 0, 0), color1Portion, _savedLeds[_highestPixelAddress-1 - i - j]);
+                    _leds[rightIndex] = _blendColors(CRGB(0, 0, 0), color1Portion, _savedLeds[rightIndex]);
                 }
             }
         }
@@ -2463,10 +2293,6 @@ void Ledstrip::__powerMultiSweep() {
   
     _l.logd("End powerMultiSweep mode");
     
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 #pragma endregion
 
@@ -2479,6 +2305,8 @@ void Ledstrip::__powerMultiSweep() {
 */
 /******************************************************************************/
 void Ledstrip::_rotateLeft(uint8_t steps) {
+    if (_highestPixelAddress == 0) return;
+    steps %= _highestPixelAddress;
     for (uint8_t step = 0; step < steps; step++) {
         CRGB temp = _leds[0];
         for (uint16_t i = 0; i < _highestPixelAddress-1; i++){
@@ -2496,7 +2324,10 @@ void Ledstrip::_rotateLeft(uint8_t steps) {
 */
 /******************************************************************************/
 void Ledstrip::_rotateRight(uint8_t steps) {
-    CRGB temp[steps];                                                           //Temporary array
+    if (_highestPixelAddress == 0) return;
+    steps %= _highestPixelAddress;
+    if (steps == 0) return;
+    CRGB temp[MAX_NUMBER_LEDS];                                                 //Temporary array
     
     /* Copying last d elements in the temporary array */
     for (uint16_t i = _highestPixelAddress - steps; i < _highestPixelAddress; i++) {
@@ -2569,20 +2400,30 @@ CRGB Ledstrip::_blendColors(CRGB color1, float color1Portion, CRGB color2) {
 */
 /******************************************************************************/
 void Ledstrip::_showLeds() {
+    if (_frameMutex == NULL || xSemaphoreTake(_frameMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Timed out while locking LED frame");
+        return;
+    }
     if (_isOn || _state < NUM_POWER_ANIMATIONS) {
+        for (uint16_t i = 0; i < _highestPixelAddress; i++) {
+            _publishedLeds[i] = _leds[i];
+        }
         if (_driver == _SK6812) {
             for (uint8_t i = 0; i < _numberLeds; i++) {
-                _crgbwTempLeds[i] = CRGBtoCRGBW(_leds[_ledAddresses[i]]);
+                uint16_t address = _ledAddresses[i];
+                _crgbwTempLeds[i] = address < MAX_NUMBER_LEDS ? CRGBtoCRGBW(_leds[address]) : CRGBW(0, 0, 0, 0);
             }
         } else {
             for (uint8_t i = 0; i < _numberLeds; i++) {
-                _tempLeds[i] = _leds[_ledAddresses[i]];
+                uint16_t address = _ledAddresses[i];
+                _tempLeds[i] = address < MAX_NUMBER_LEDS ? _leds[address] : CRGB(0, 0, 0);
             }
         }
         FastLED.show();
     } else {
         _l.logd("Leds not updated because the strip is off");
     }
+    xSemaphoreGive(_frameMutex);
 }
 
 /******************************************************************************/
@@ -2611,8 +2452,9 @@ CRGB Ledstrip::_colorWheel(uint8_t position) {
 /******************************************************************************/
 void Ledstrip::__startModeTask(void* parameter) {
     Ledstrip* ledRef = static_cast<Ledstrip *>(parameter);
+    uint8_t taskState = ledRef->_state;
 
-    switch (ledRef->_state) {
+    switch (taskState) {
         case _POWER_FADE:
             ledRef->__powerFade();
             break;
@@ -2640,6 +2482,14 @@ void Ledstrip::__startModeTask(void* parameter) {
             break;
         default:
             break;
+    }
+
+    if (taskState != _LOOPING) {
+        UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
+        ledRef->_l.logd("LED task stopped, stack high water mark: " + String(stackRemaining));
+        ledRef->_taskHandler = NULL;
+        ledRef->_state = _READY_TO_RUN;
+        vTaskDelete(NULL);
     }
 
     if (ledRef->_state == _LOOPING) {
@@ -2729,7 +2579,18 @@ void Ledstrip::__startModeTask(void* parameter) {
             default:
                 break;
         }
+
+        UBaseType_t stackRemaining = uxTaskGetStackHighWaterMark(NULL);
+        ledRef->_l.logd("Mode task stopped, stack high water mark: " + String(stackRemaining));
+        ledRef->_taskHandler = NULL;
+        ledRef->_state = _READY_TO_RUN;
+        vTaskDelete(NULL);
     }
+
+    ledRef->_l.loge("Mode task dispatcher reached an invalid state");
+    ledRef->_taskHandler = NULL;
+    ledRef->_state = _READY_TO_RUN;
+    vTaskDelete(NULL);
 }
 
 /******************************************************************************/
@@ -2739,17 +2600,141 @@ void Ledstrip::__startModeTask(void* parameter) {
 /******************************************************************************/
 void Ledstrip::_waitUntilIdle() {
     if (_state == _LOOPING) {
-        vTaskDelete(_taskHandler);
-        _taskHandler = NULL;
-        _l.logd("Ended looping mode");
-        
-        vTaskDelay(10);                                                          //Otherwise program gets stuck
-        _state = _READY_TO_RUN;
+        _stopRequested = true;
     }
-    
+
+    uint32_t waitStarted = millis();
     while (_state != _READY_TO_RUN && _state != _WAIT_FOR_DOOR_CLOSED) {
-        vTaskDelay(1);
+        if (millis() - waitStarted >= TASK_WAIT_TIMEOUT_MS) {
+            _l.logfe("LED task stop timed out; restarting to preserve FreeRTOS mutex integrity");
+            vTaskDelay(pdMS_TO_TICKS(TASK_RECOVERY_RESTART_DELAY_MS));
+            ESP.restart();
+            while (true) vTaskDelay(portMAX_DELAY);
+        }
+        vTaskDelay(pdMS_TO_TICKS(TASK_WAIT_POLL_MS));
     }
+    _stopRequested = false;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Creates an LED task and restores a safe state when creation fails.
+  @param    taskName            FreeRTOS task name
+  @returns  bool                True when the task was created
+*/
+/******************************************************************************/
+bool Ledstrip::_createTask(const char* taskName) {
+    _stopRequested = false;
+    _taskHandler = NULL;
+    BaseType_t result = xTaskCreatePinnedToCore(
+                                                __startModeTask,                //Task function
+                                                taskName,                       //Task name
+                                                LEDSTRIP_TASK_STACK_SIZE,       //Stack size in bytes
+                                                this,                           //Task parameter
+                                                LEDSTRIP_TASK_PRIORITY,         //Task priority
+                                                &_taskHandler,                  //Task handler
+                                                LEDSTRIP_TASK_CORE              //Task CPU core
+                                            );
+                                            
+    if (result != pdPASS || _taskHandler == NULL) {
+        _l.loge("Could not create LED task: " + String(taskName));
+        _taskHandler = NULL;
+        _state = _READY_TO_RUN;
+        return false;
+    }
+    return true;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Waits in short intervals so a looping mode can stop promptly.
+  @param    delayMs             Total delay in milliseconds
+*/
+/******************************************************************************/
+void Ledstrip::_delayMode(uint32_t delayMs) {
+    delayMs = constrain(delayMs, (uint32_t) MIN_MODE_DELAY_MS, (uint32_t) MAX_MODE_DELAY_MS);
+    uint32_t waitStarted = millis();
+    
+    while (!_stopRequested && millis() - waitStarted < delayMs) {
+        uint32_t remaining = delayMs - (millis() - waitStarted);
+        uint32_t waitTime = min(remaining, (uint32_t) TASK_WAIT_POLL_MS);
+        vTaskDelay(pdMS_TO_TICKS(max(waitTime, (uint32_t) 1)));
+    }
+}
+
+/******************************************************************************/
+/*!
+  @brief    Locks public LED operations so callers cannot change state concurrently.
+  @returns  bool                True when the lock was acquired
+*/
+/******************************************************************************/
+bool Ledstrip::_lockOperation() {
+    if (_operationMutex == NULL) {
+        _l.loge("LED operation mutex is not initialized");
+        return false;
+    }
+    if (xSemaphoreTakeRecursive(_operationMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Timed out while locking LED operations");
+        return false;
+    }
+    return true;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Releases the LED operation lock.
+*/
+/******************************************************************************/
+void Ledstrip::_unlockOperation() {
+    xSemaphoreGiveRecursive(_operationMutex);
+}
+
+/******************************************************************************/
+/*!
+  @brief    Checks whether a mode can be started.
+  @param    mode                Mode ID
+  @returns  bool                True when the mode is supported
+*/
+/******************************************************************************/
+bool Ledstrip::_isValidMode(uint8_t mode) {
+    return (mode >= MODE_COLOR && mode <= MODE_TEMPLATE_10) || mode == MODE_DRAWING ||
+           mode == SYSTEM_MODE_PULSES || mode == SYSTEM_MODE_ALARM;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Checks whether a mode has a safe parameter storage slot.
+  @param    mode                Mode ID
+  @returns  bool                True when the mode can be configured
+*/
+/******************************************************************************/
+bool Ledstrip::_isConfigurableMode(uint8_t mode) {
+    return mode >= MODE_COLOR && mode < NUM_MODE_PARAMETER_SLOTS;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Clamps externally supplied mode parameters to safe limits.
+  @param    parameters          Mode parameters to validate
+  @returns  ModeParameters      Validated mode parameters
+*/
+/******************************************************************************/
+ModeParameters Ledstrip::_validateModeParameters(ModeParameters parameters) {
+    if (parameters.minColorPos > parameters.maxColorPos) {
+        uint8_t minimumColorPosition = parameters.maxColorPos;
+        parameters.maxColorPos = parameters.minColorPos;
+        parameters.minColorPos = minimumColorPosition;
+    }
+    parameters.segmentSize = constrain(parameters.segmentSize, 1, MAX_NUMBER_LEDS);
+    parameters.tailLength = constrain(parameters.tailLength, 0, MAX_NUMBER_LEDS - 1);
+    parameters.waveLength = constrain(parameters.waveLength, 1, MAX_WAVE_LENGTH);
+    parameters.timeFade = min(parameters.timeFade, (uint16_t) MAX_FADE_TIME);
+    parameters.delay = constrain(parameters.delay, MIN_MODE_DELAY_MS, MAX_MODE_DELAY_MS);
+    parameters.delayBetween = constrain(parameters.delayBetween, MIN_MODE_DELAY_MS, MAX_MODE_DELAY_MS);
+    parameters.numberOfElements = constrain(parameters.numberOfElements, 1, MAX_MODE_ELEMENTS);
+    parameters.direction = parameters.direction == DIRECTION_RIGHT ? DIRECTION_RIGHT : DIRECTION_LEFT;
+    parameters.fadeLength = constrain(parameters.fadeLength, 1, MAX_NUMBER_LEDS);
+    return parameters;
 }
 
 /******************************************************************************/
@@ -2774,24 +2759,44 @@ void Ledstrip::_loadPixelAddresses() {
     _nvMemory.end();
     
     if (addressString == "") {
-        for (uint16_t i = 0; i < _numberLeds; i++) {
-            _ledAddresses[i] = i;
-        }
-        _highestPixelAddress = _numberLeds;
+        _resetPixelAddresses();
         return;
     }
         
     JsonDocument jsonParser;
-    deserializeJson(jsonParser, addressString);  //Convert JSON string to object
+    DeserializationError error = deserializeJson(jsonParser, addressString);
+    if (error || !jsonParser.is<JsonArray>() || jsonParser.size() != _numberLeds) {
+        _l.logw("Stored LED addressing is invalid, using sequential addressing");
+        _resetPixelAddresses();
+        return;
+    }
     
     _highestPixelAddress = 0;
     for (uint16_t i = 0; i < _numberLeds; i++) {
-        _ledAddresses[i] = (uint16_t) jsonParser[i];
+        uint32_t address = jsonParser[i].as<uint32_t>();
+        if (address >= MAX_NUMBER_LEDS) {
+            _l.logw("Stored LED address is invalid, using sequential addressing");
+            _resetPixelAddresses();
+            return;
+        }
+        _ledAddresses[i] = (uint16_t) address;
         if (_highestPixelAddress < _ledAddresses[i]) {
             _highestPixelAddress = _ledAddresses[i];
         }
     }
     _highestPixelAddress += 1;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Restores sequential pixel addressing.
+*/
+/******************************************************************************/
+void Ledstrip::_resetPixelAddresses() {
+    for (uint16_t i = 0; i < _numberLeds; i++) {
+        _ledAddresses[i] = i;
+    }
+    _highestPixelAddress = _numberLeds;
 }
 
 /******************************************************************************/
@@ -2846,6 +2851,7 @@ CRGB Ledstrip::_getHeatColor(uint8_t temperature, uint8_t palette) {
         }
         return CRGB(0, heatramp, 0);                                            //Coolest
     }
+    return CRGB(heatramp, 0, 0);
 }
 
 /******************************************************************************/
@@ -2855,10 +2861,10 @@ CRGB Ledstrip::_getHeatColor(uint8_t temperature, uint8_t palette) {
   @returns  uint8_t             Color position
 */
 /******************************************************************************/
-uint8_t Ledstrip::_getGradientColorPosition(uint8_t step) {
+uint8_t Ledstrip::_getGradientColorPosition(uint16_t step) {
     uint8_t colorMultiplier = MAX_WAVE_LENGTH+1 - _modeParameters[MODE_GRADIENT].waveLength;
     uint8_t range = _modeParameters[MODE_GRADIENT].maxColorPos - _modeParameters[MODE_GRADIENT].minColorPos;
-    if (range == 0) range++;
+    if (range == 0) return _modeParameters[MODE_GRADIENT].minColorPos;
 
     uint8_t colorPosition = (step * colorMultiplier + _modeParameters[MODE_GRADIENT].colorPosition) & 255;
 
@@ -2875,6 +2881,7 @@ uint8_t Ledstrip::_getGradientColorPosition(uint8_t step) {
             colorPosition = _modeParameters[MODE_GRADIENT].minColorPos + (_modeParameters[MODE_GRADIENT].minColorPos - colorPosition);
         }
     }
+    return colorPosition;
 }
 #pragma endregion
 
@@ -2951,20 +2958,25 @@ String Ledstrip::getPixelAddressing() {
 */
 /******************************************************************************/
 String Ledstrip::getPixels() {
-    String jsonString = "[";
-    
-    for (uint16_t i = 0; i < _highestPixelAddress; i++) {
-        if (_leds[i] == CRGB (0,0,0)) {
-            jsonString += "1";
-        } else {
-            jsonString += "0";
-        }
+    uint8_t pixelStates[MAX_NUMBER_LEDS] = {0};
+    uint16_t numberOfPixels = 0;
+    if (_frameMutex == NULL || xSemaphoreTake(_frameMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Timed out while reading LED frame");
+        return "[]";
+    }
+    numberOfPixels = min(_highestPixelAddress, (uint16_t) MAX_NUMBER_LEDS);
+    for (uint16_t i = 0; i < numberOfPixels; i++) {
+        pixelStates[i] = _publishedLeds[i] == CRGB(0, 0, 0) ? 1 : 0;
+    }
+    xSemaphoreGive(_frameMutex);
 
-        if (i < _highestPixelAddress-1) {
-            jsonString += ", ";
-        }
+    String jsonString = "[";
+    for (uint16_t i = 0; i < numberOfPixels; i++) {
+        jsonString += String(pixelStates[i]);
+        if (i < numberOfPixels - 1) jsonString += ", ";
     }
     jsonString += "]";
+    return jsonString;
 }
 
 /******************************************************************************/
@@ -2974,7 +2986,7 @@ String Ledstrip::getPixels() {
 */
 /******************************************************************************/
 const CRGB* Ledstrip::getPixelColors() const {
-    return _leds;
+    return _publishedLeds;
 }
 
 /******************************************************************************/
@@ -3026,8 +3038,10 @@ uint8_t Ledstrip::getBrightness() {
 */
 /******************************************************************************/
 void Ledstrip::setBrightness(uint8_t brightness) {
-    _brightness = brightness;
+    if (!_lockOperation()) return;
+    _brightness = min(brightness, (uint8_t) MAX_BRIGHTNESS);
     _fadeBrightness();
+    _unlockOperation();
 }
 #pragma endregion
 
@@ -3048,15 +3062,7 @@ void Ledstrip::_fadeBrightness() {
     
     _l.logd("Start fadeBrightness mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "FadeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("FadeHandler");
 }
 
 /******************************************************************************/
@@ -3087,10 +3093,6 @@ void Ledstrip::__fadeBrightness() {
     }
 
     _l.logd("End fadeBrightness mode");
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -3105,15 +3107,7 @@ void Ledstrip::_fadeToColor() {
     
     _l.logd("Start fadeToColor mode");
         
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "FadeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("FadeHandler");
 }
 
 /******************************************************************************/
@@ -3122,7 +3116,7 @@ void Ledstrip::_fadeToColor() {
 */
 /******************************************************************************/
 void Ledstrip::__fadeToColor() {
-    int8_t directions[_highestPixelAddress][3] = {0};                           //For colorshifting, rgb
+    int8_t directions[MAX_NUMBER_LEDS][3] = {0};                               //For color shifting, RGB
     uint16_t numDone = 0;
     
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
@@ -3155,10 +3149,6 @@ void Ledstrip::__fadeToColor() {
 
     _l.logd("End fadeToColor mode");
     
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/
@@ -3173,21 +3163,13 @@ void Ledstrip::_fadeToMultipleColors(uint8_t desiredColorPos, bool fadeToGradien
     _waitUntilIdle();
 
     _desiredColorPos = desiredColorPos;
-    _fadeToGradientColors = desiredColorPos;
+    _fadeToGradientColors = fadeToGradientColors;
 
     _state = _FADE_TO_MULTIPLE_COLOR;
     
     _l.logd("Start fadeToMultipleColors mode");
     
-    xTaskCreatePinnedToCore(
-        Ledstrip::__startModeTask,                                              //Task function
-        "FadeHandler",                                                          //Task name
-        8000,                                                                   //Stack size in bytes
-        this,                                                                   //Task parameter
-        PRIORITY,                                                               //Task priority
-        &_taskHandler,                                                          //Task handler
-        CORE_NUMBER                                                             //Task CPU core
-    );
+    _createTask("FadeHandler");
 }
 
 /******************************************************************************/
@@ -3196,8 +3178,8 @@ void Ledstrip::_fadeToMultipleColors(uint8_t desiredColorPos, bool fadeToGradien
 */
 /******************************************************************************/
 void Ledstrip::__fadeToMultipleColors() {
-    CRGB desiredColors[_highestPixelAddress];
-    int8_t directions[_highestPixelAddress][3] = {0};                           //For colorshifting, rgb
+    CRGB desiredColors[MAX_NUMBER_LEDS];
+    int8_t directions[MAX_NUMBER_LEDS][3] = {0};                               //For color shifting, RGB
     uint16_t numDone = 0;
 
     for (uint16_t i = 0; i < _highestPixelAddress; i++) {
@@ -3241,10 +3223,6 @@ void Ledstrip::__fadeToMultipleColors() {
     
     _l.logd("End fadeToMultipleColors mode");
     
-    _state = _READY_TO_RUN;
-
-    _taskHandler = NULL;
-    vTaskDelete(_taskHandler);
 }
 
 /******************************************************************************/

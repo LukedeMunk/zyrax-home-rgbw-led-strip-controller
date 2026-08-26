@@ -577,17 +577,24 @@ bool MemoryManager::_checkFile(String filePath, String defaultFilePath) {
 */
 /******************************************************************************/
 CRGB MemoryManager::_stringToCRGB(String colorString) {
-    CRGB color;
+    CRGB color = CRGB(0, 0, 0);
+    if (colorString.length() < 7 || colorString[0] != '(') {
+        _l.logw("Stored color has an invalid format");
+        return color;
+    }
     uint8_t index = 1;                                                          //'('
-    uint8_t c = 0;
+    uint8_t c = 1;
     
     for (uint8_t channel = 0; channel < 3; channel++) {
-        /* Loop through the filename and stop when '.' is found */
-        while (colorString[c] != ',' && colorString[c] != ')' && c < 16) {
+        while (c < colorString.length() && c < 16 && colorString[c] != ',' && colorString[c] != ')') {
             c++;
         }
-
-        color[channel] = (uint8_t) atoi(colorString.substring(index, c).c_str());
+        if (c >= colorString.length() || c >= 16 || c == index) {
+            _l.logw("Stored color has an invalid format");
+            return CRGB(0, 0, 0);
+        }
+        int32_t channelValue = colorString.substring(index, c).toInt();
+        color[channel] = constrain(channelValue, 0, 255);
         c++;
         index = c;
     }

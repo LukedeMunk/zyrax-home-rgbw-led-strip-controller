@@ -31,7 +31,6 @@
 #define LOCAL_SENSOR2_PIN               6
 
 /* Others */
-#define MAX_BRIGHTNESS                  180
 #define MAX_NUMBER_LEDS                 250
 
 /* Network credentials */

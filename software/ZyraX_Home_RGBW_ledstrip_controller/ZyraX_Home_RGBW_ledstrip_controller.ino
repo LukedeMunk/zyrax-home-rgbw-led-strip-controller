@@ -65,6 +65,7 @@ uint8_t bootMode = BOOT_MODE_NORMAL;
 bool checkParameters(AsyncWebServerRequest *request, const char* neededParameters[], uint8_t numberOfParameters, bool needsAll = true, bool post = false);
 bool checkPostParameters(AsyncWebServerRequest *request, const char* neededParameters[], uint8_t numberOfParameters, bool needsAll = true);
 String generateResponseJson(String endpoint, uint16_t responseCode, String message = "");
+bool waitForStripState(bool allowDoorWait = false);
 #pragma endregion
 
 
@@ -79,6 +80,7 @@ void setup() {
     delay(100);
 
     memoryManager.initialize();
+    commandQueue.initialize();
     
     nvMemory.begin(NV_MEM_CONFIG, true);
     id = nvMemory.getUChar("id", DEFAULT_ID);
@@ -121,15 +123,19 @@ void setup() {
         initializeSensor();
     }
 
-    xTaskCreatePinnedToCore(
-        executeCommands,                                                        //Task function
-        "executeCommand",                                                       //String with name of task (by default max 16 characters long) 
-        8000,                                                                   //Stack size in bytes
-        NULL,                                                                   //Parameter passed as input of the task
-        0,                                                                      //Priority of the task
-        &_taskHandler,                                                          //Task handler
-        0
-    );
+    BaseType_t taskResult = xTaskCreatePinnedToCore(
+                                                    executeCommands,            //Task function
+                                                    "executeCommand",           //Task name
+                                                    COMMAND_TASK_STACK_SIZE,    //Stack size in byte
+                                                    NULL,                       //Task parameter
+                                                    COMMAND_TASK_PRIORITY,      //Task priority
+                                                    &_taskHandler,              //Task handler
+                                                    COMMAND_TASK_CORE           //Task CPU core
+                                                );
+
+    if (taskResult != pdPASS || _taskHandler == NULL) {
+        l.logfe("Could not create command task");
+    }
 }
 
 
@@ -267,8 +273,12 @@ void setConfiguration(AsyncWebServerRequest *request) {
 
     if (request->hasParam("power_animation", true)) {
         l.logd("power_animation: " + request->getParam("power_animation", true)->value());
-        uint8_t powerAnimation = (uint8_t) atoi(request->getParam("power_animation", true)->value().c_str());
-        strip.setPowerAnimation(powerAnimation);
+        int32_t powerAnimation = request->getParam("power_animation", true)->value().toInt();
+        if (powerAnimation >= 0 && powerAnimation < NUM_POWER_ANIMATIONS) {
+            strip.setPowerAnimation((uint8_t) powerAnimation);
+        } else {
+            l.logw("Power animation is outside the supported range");
+        }
     }
 
     if (request->hasParam("has_sensor", true)) {
@@ -317,18 +327,23 @@ void setConfiguration(AsyncWebServerRequest *request) {
     }
 
     if (request->hasParam("led_addresses", true)) {
+        if (!request->hasParam("number_of_leds", true)) {
+            l.logw("LED count is required with LED addressing");
+            return;
+        }
         String addresses = request->getParam("led_addresses", true)->value();
-        uint16_t numberOfLeds = (uint16_t) atoi(request->getParam("number_of_leds", true)->value().c_str());
+        int32_t requestedNumberOfLeds = request->getParam("number_of_leds", true)->value().toInt();
+        uint16_t numberOfLeds = requestedNumberOfLeds > 0 ? requestedNumberOfLeds : 0;
         l.logd("led_addresses: " + addresses);
 
         if (numberOfLeds == 0) {
             l.logw("Number of leds cannot be zero, ignoring");
-        } else if (numberOfLeds >= MAX_NUMBER_LEDS) {
+        } else if (numberOfLeds > MAX_NUMBER_LEDS) {
             l.logw("Number of leds too high, ignoring");
         } else {
-            //if (numberOfLeds != strip.getNumberOfLeds()) {
-            //    needsRestart = true;
-            //}
+            if (numberOfLeds != strip.getNumberOfLeds()) {
+                needsRestart = true;
+            }
             strip.setPixelAddressing(addresses, numberOfLeds);
         }
     }
@@ -365,9 +380,16 @@ void setPower(AsyncWebServerRequest *request) {
         return;
     }
 
+    int32_t requestedPower = request->getParam("power", true)->value().toInt();
+    if (requestedPower < 0 || requestedPower > 1) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_BAD_REQUEST, "Invalid power state");
+        request->send(HTTP_CODE_BAD_REQUEST, "application/json", resultString);
+        return;
+    }
+
     Command command;
     command.command = COMMAND_SET_POWER;
-    command.parameter1 = (uint8_t) atoi(request->getParam("power", true)->value().c_str());
+    command.parameter1 = requestedPower;
 
     if (commandQueue.pushCommand(command)) {
         resultString = generateResponseJson(request->url(), HTTP_CODE_OK);
@@ -392,9 +414,16 @@ void setBrightness(AsyncWebServerRequest *request) {
         return;
     }
 
+    int32_t requestedBrightness = request->getParam("brightness", true)->value().toInt();
+    if (requestedBrightness < 0 || requestedBrightness > MAX_BRIGHTNESS) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_BAD_REQUEST, "Invalid brightness");
+        request->send(HTTP_CODE_BAD_REQUEST, "application/json", resultString);
+        return;
+    }
+
     Command command;
     command.command = COMMAND_SET_BRIGHTNESS;
-    command.parameter1 = (uint8_t) atoi(request->getParam("brightness", true)->value().c_str());
+    command.parameter1 = requestedBrightness;
 
     if (commandQueue.pushCommand(command)) {
         resultString = generateResponseJson(request->url(), HTTP_CODE_OK);
@@ -433,10 +462,14 @@ void drawPixels(AsyncWebServerRequest *request) {
     }
     
     JsonDocument jsonParser;
+    DeserializationError error = deserializeJson(jsonParser, request->getParam("leds", true)->value());
+    if (error || !jsonParser.is<JsonArray>() || jsonParser.size() != strip.getNumberOfLeds()) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_BAD_REQUEST, "Invalid LED data");
+        request->send(HTTP_CODE_BAD_REQUEST, "application/json", resultString);
+        return;
+    }
 
-    deserializeJson(jsonParser, request->getParam("leds", true)->value());  //Convert JSON string to object
-
-    CRGB leds[strip.getNumberOfLeds()];
+    CRGB leds[MAX_NUMBER_LEDS] = {CRGB(0, 0, 0)};
     for (uint16_t i = 0; i < strip.getNumberOfLeds(); i++) {
         leds[i] = hexStringToRGB(jsonParser[i]);
     }
@@ -461,9 +494,16 @@ void setMode(AsyncWebServerRequest *request) {
         return;
     }
 
+    int32_t requestedMode = request->getParam("mode", true)->value().toInt();
+    if (requestedMode < 0 || requestedMode > UINT8_MAX) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_BAD_REQUEST, "Invalid mode");
+        request->send(HTTP_CODE_BAD_REQUEST, "application/json", resultString);
+        return;
+    }
+
     Command command;
     command.command = COMMAND_SET_MODE;
-    command.parameter1 = (uint8_t) atoi(request->getParam("mode", true)->value().c_str());
+    command.parameter1 = requestedMode;
 
     if (commandQueue.pushCommand(command)) {
         resultString = generateResponseJson(request->url(), HTTP_CODE_OK);
@@ -488,13 +528,16 @@ void configureMode(AsyncWebServerRequest *request) {
         return;
     }
 
-    resultString = generateResponseJson(request->url(), HTTP_CODE_OK);
-    request->send(HTTP_CODE_OK, "application/json", resultString);
-
     uint8_t numberOfParams = request->params();
     l.logd("numberOfParams: " + String(numberOfParams));
     
-    uint8_t mode = (uint8_t) atoi(request->getParam("mode", true)->value().c_str());
+    int32_t requestedMode = request->getParam("mode", true)->value().toInt();
+    if (requestedMode < MODE_COLOR || requestedMode >= NUM_MODE_PARAMETER_SLOTS) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_BAD_REQUEST, "Invalid mode");
+        request->send(HTTP_CODE_BAD_REQUEST, "application/json", resultString);
+        return;
+    }
+    uint8_t mode = requestedMode;
 
     l.logd("Mode: " + String(mode));
 
@@ -565,94 +608,98 @@ void configureMode(AsyncWebServerRequest *request) {
         if (!request->hasParam(String(PARAMETER_ID_SEGMENT_SIZE), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_SEGMENT_SIZE));
         } else {
-            parameters.segmentSize = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_SEGMENT_SIZE), true)->value().c_str());
+            parameters.segmentSize = constrain(request->getParam(String(PARAMETER_ID_SEGMENT_SIZE), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_TAIL_LENGTH)) {
         if (!request->hasParam(String(PARAMETER_ID_TAIL_LENGTH), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_TAIL_LENGTH));
         } else {
-            parameters.tailLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_TAIL_LENGTH), true)->value().c_str());
+            parameters.tailLength = constrain(request->getParam(String(PARAMETER_ID_TAIL_LENGTH), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_WAVE_LENGTH)) {
         if (!request->hasParam(String(PARAMETER_ID_WAVE_LENGTH), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_WAVE_LENGTH));
         } else {
-            parameters.waveLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_WAVE_LENGTH), true)->value().c_str());
+            parameters.waveLength = constrain(request->getParam(String(PARAMETER_ID_WAVE_LENGTH), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_TIME_FADE)) {
         if (!request->hasParam(String(PARAMETER_ID_TIME_FADE), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_TIME_FADE));
         } else {
-            parameters.timeFade = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_TIME_FADE), true)->value().c_str());
+            parameters.timeFade = constrain(request->getParam(String(PARAMETER_ID_TIME_FADE), true)->value().toInt(), 0L, 65535L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DELAY)) {
         if (!request->hasParam(String(PARAMETER_ID_DELAY), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DELAY));
         } else {
-            parameters.delay = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_DELAY), true)->value().c_str());
+            parameters.delay = constrain(request->getParam(String(PARAMETER_ID_DELAY), true)->value().toInt(), 0L, 65535L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DELAY_BETWEEN)) {
         if (!request->hasParam(String(PARAMETER_ID_DELAY_BETWEEN), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DELAY_BETWEEN));
         } else {
-            parameters.delayBetween = (uint16_t) atoi(request->getParam(String(PARAMETER_ID_DELAY_BETWEEN), true)->value().c_str());
+            parameters.delayBetween = constrain(request->getParam(String(PARAMETER_ID_DELAY_BETWEEN), true)->value().toInt(), 0L, 65535L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_RANDOMNESS_DELAY)) {
         if (!request->hasParam(String(PARAMETER_ID_RANDOMNESS_DELAY), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_RANDOMNESS_DELAY));
         } else {
-            parameters.randomnessDelay = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_RANDOMNESS_DELAY), true)->value().c_str());
+            parameters.randomnessDelay = constrain(request->getParam(String(PARAMETER_ID_RANDOMNESS_DELAY), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_INTENSITY)) {
         if (!request->hasParam(String(PARAMETER_ID_INTENSITY), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_INTENSITY));
         } else {
-            parameters.intensity = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_INTENSITY), true)->value().c_str());
+            parameters.intensity = constrain(request->getParam(String(PARAMETER_ID_INTENSITY), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_DIRECTION)) {
         if (!request->hasParam(String(PARAMETER_ID_DIRECTION), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_DIRECTION));
         } else {
-            parameters.direction = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_DIRECTION), true)->value().c_str());
+            parameters.direction = constrain(request->getParam(String(PARAMETER_ID_DIRECTION), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_NUMBER_OF_ELEMENTS)) {
         if (!request->hasParam(String(PARAMETER_ID_NUMBER_OF_ELEMENTS), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_NUMBER_OF_ELEMENTS));
         } else {
-            parameters.numberOfElements = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_NUMBER_OF_ELEMENTS), true)->value().c_str());
+            parameters.numberOfElements = constrain(request->getParam(String(PARAMETER_ID_NUMBER_OF_ELEMENTS), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_PALETTE)) {
         if (!request->hasParam(String(PARAMETER_ID_PALETTE), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_PALETTE));
         } else {
-            parameters.palette = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_PALETTE), true)->value().c_str());
+            parameters.palette = constrain(request->getParam(String(PARAMETER_ID_PALETTE), true)->value().toInt(), 0L, 255L);
         }
     }
     if (memoryManager.modeHasParameter(mode, PARAMETER_ID_FADE_LENGTH)) {
         if (!request->hasParam(String(PARAMETER_ID_FADE_LENGTH), true)) {
             l.logw("Missing mode configuration parameter: " + String(PARAMETER_ID_FADE_LENGTH));
         } else {
-            parameters.fadeLength = (uint8_t) atoi(request->getParam(String(PARAMETER_ID_FADE_LENGTH), true)->value().c_str());
+            parameters.fadeLength = constrain(request->getParam(String(PARAMETER_ID_FADE_LENGTH), true)->value().toInt(), 0L, 255L);
         }
     }
 
-    strip.configureMode(mode, parameters);
-
-    if (request->hasParam("start_mode", true)) {
-        Command command;
-        command.command = COMMAND_SET_MODE;
-        command.parameter1 = mode;
-        commandQueue.pushCommand(command);
+    Command command;
+    command.command = COMMAND_CONFIGURE_MODE;
+    command.parameter1 = mode;
+    command.modeParameters = parameters;
+    command.startMode = request->hasParam("start_mode", true);
+    if (commandQueue.pushCommand(command)) {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_OK);
+        request->send(HTTP_CODE_OK, "application/json", resultString);
+    } else {
+        resultString = generateResponseJson(request->url(), HTTP_CODE_SERVICE_UNAVAILABLE, "Not available");
+        request->send(HTTP_CODE_SERVICE_UNAVAILABLE, "application/json", resultString);
     }
 }
 
@@ -942,8 +989,10 @@ void connectToMasterServer() {
     int16_t responseCode = http.POST(payload);
     http.end();                                                                 //Free resources
 
-    while (id == DEFAULT_ID && responseCode != HTTP_CODE_OK) {
-        vTaskDelay(10000);
+    uint8_t retry = 0;
+    while (id == DEFAULT_ID && responseCode != HTTP_CODE_OK && retry < HTTP_RETRIES) {
+        retry++;
+        vTaskDelay(pdMS_TO_TICKS(10000));
 
         http.begin(url);
         http.setConnectTimeout(HTTP_TIMEOUT);
@@ -1029,41 +1078,65 @@ bool checkPostParameters(AsyncWebServerRequest *request, const char* neededParam
 /******************************************************************************/
 void executeCommands(void *parameters) {
     while (true) {
-        if (commandQueue.isEmpty()) {
-            vTaskDelay(10);
+        Command command;
+        if (!commandQueue.pullCommand(command)) {
+            vTaskDelay(pdMS_TO_TICKS(TASK_WAIT_POLL_MS));
             continue;
         }
-
-        Command command = commandQueue.getCommand();
 
         switch (command.command) {
             case COMMAND_SET_POWER:
                 strip.setPower((bool) command.parameter1);
-                commandQueue.popCommand();
-                while (strip.getState() != _READY_TO_RUN && strip.getState() != _LOOPING) continue;
+                waitForStripState();
                 break;
             case COMMAND_SET_BRIGHTNESS:
                 strip.setBrightness((uint8_t) command.parameter1);
-                commandQueue.popCommand();
-                while (strip.getState() != _READY_TO_RUN && strip.getState() != _LOOPING) continue;
+                waitForStripState();
                 break;
             case COMMAND_SET_MODE:
                 strip.setMode((uint8_t) command.parameter1);
-                commandQueue.popCommand();
-                while (strip.getState() != _READY_TO_RUN && strip.getState() != _LOOPING) continue;
+                waitForStripState();
                 break;
             case COMMAND_DOOR_CHANGE:
                 strip.doorHandler((bool) command.parameter1);
-                commandQueue.popCommand();
-                while (strip.getState() != _READY_TO_RUN && strip.getState() != _LOOPING && strip.getState() != _WAIT_FOR_DOOR_CLOSED) continue;
+                waitForStripState(true);
                 break;
+            case COMMAND_CONFIGURE_MODE:
+                {
+                bool restartMode = strip.getMode() == command.parameter1 && strip.getState() == _LOOPING;
+                strip.configureMode((uint8_t) command.parameter1, command.modeParameters);
+                if (command.startMode || restartMode) {
+                    strip.setMode((uint8_t) command.parameter1);
+                    waitForStripState();
+                }
+                break;
+                }
             
             default:
                 l.logw("Command not found, deleting it");
-                commandQueue.popCommand();
                 break;
         }
     }
+}
+
+/******************************************************************************/
+/*!
+  @brief    Waits for a stable LED strip state without starving the idle task.
+  @param    allowDoorWait       Whether the door wait state is accepted
+  @returns  bool                True when a stable state was reached
+*/
+/******************************************************************************/
+bool waitForStripState(bool allowDoorWait) {
+    uint32_t waitStarted = millis();
+    while (strip.getState() != _READY_TO_RUN && strip.getState() != _LOOPING &&
+           (!allowDoorWait || strip.getState() != _WAIT_FOR_DOOR_CLOSED)) {
+        if (millis() - waitStarted >= TASK_WAIT_TIMEOUT_MS) {
+            l.loge("Timed out while waiting for LED strip state");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(TASK_WAIT_POLL_MS));
+    }
+    return true;
 }
 
 /******************************************************************************/

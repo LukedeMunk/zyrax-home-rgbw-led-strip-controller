@@ -26,8 +26,6 @@
 #define LOG_TYPE_FATAL_ERROR            4
 #define LOG_TYPE_NONE                   100
 
-#define MAX_NUMBER_OF_LOGS              500
-
 class Logger {
     public:
         Logger(const char* tag="", uint8_t logLevel=LOG_TYPE_DEBUG);

@@ -21,6 +21,26 @@ CommandQueue::CommandQueue() {
     _l.setTag("CommandQueue");
     _queuePointer = 0;
     _queueIsEmpty = true;
+    _mutex = NULL;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Initializes the queue synchronization primitive.
+  @returns  bool                True when the queue can be used safely
+*/
+/******************************************************************************/
+bool CommandQueue::initialize() {
+    if (_mutex != NULL) {
+        return true;
+    }
+
+    _mutex = xSemaphoreCreateMutex();
+    if (_mutex == NULL) {
+        _l.loge("Could not create command queue mutex");
+        return false;
+    }
+    return true;
 }
 
 /******************************************************************************/
@@ -31,7 +51,16 @@ CommandQueue::CommandQueue() {
 */
 /******************************************************************************/
 Command CommandQueue::getCommand(uint8_t index) {
-    return _commandQueue[index];
+    Command command;
+    if (_mutex == NULL || xSemaphoreTake(_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Could not lock command queue");
+        return command;
+    }
+    if (index < _queuePointer) {
+        command = _commandQueue[index];
+    }
+    xSemaphoreGive(_mutex);
+    return command;
 }
 
 /******************************************************************************/
@@ -41,7 +70,12 @@ Command CommandQueue::getCommand(uint8_t index) {
 */
 /******************************************************************************/
 bool CommandQueue::isEmpty() {
-    return _queueIsEmpty;
+    if (_mutex == NULL || xSemaphoreTake(_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        return true;
+    }
+    bool isEmpty = _queueIsEmpty;
+    xSemaphoreGive(_mutex);
+    return isEmpty;
 }
 
 /******************************************************************************/
@@ -52,7 +86,13 @@ bool CommandQueue::isEmpty() {
 */
 /******************************************************************************/
 bool CommandQueue::pushCommand(Command command) {
+    if (_mutex == NULL || xSemaphoreTake(_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Could not lock command queue");
+        return false;
+    }
+
     if (_queuePointer >= MAX_QUEUE_ITEMS) {
+        xSemaphoreGive(_mutex);
         _l.loge("Command queue full, cannot save command");
         return false;
     }
@@ -60,22 +100,27 @@ bool CommandQueue::pushCommand(Command command) {
     if (command.priority == PRIORITY_LOW) {
         _pushCommand(command, _queuePointer);
     } else {
+        bool isInserted = false;
         /* Check where command need to be placed based on priority */
-        for (uint8_t i = 0; i < MAX_QUEUE_ITEMS; i++) {
+        for (uint8_t i = 0; i < _queuePointer; i++) {
             if (_commandQueue[i].priority < command.priority) {
                 _pushCommand(command, i);
+                isInserted = true;
                 break;
             }
+        }
+        if (!isInserted) {
+            _pushCommand(command, _queuePointer);
         }
     }
 
     _queuePointer++;
     _queueIsEmpty = false;
 
-    _l.logi("Command added to command queue. Number of commands to be executed: " + String(_queuePointer));
-
-   _cleanUp();
-    
+    _cleanUp();
+    uint8_t numberOfCommands = _queuePointer;
+    xSemaphoreGive(_mutex);
+    _l.logi("Command added to command queue. Number of commands to be executed: " + String(numberOfCommands));
     return true;
 }
 
@@ -86,26 +131,51 @@ bool CommandQueue::pushCommand(Command command) {
 */
 /******************************************************************************/
 void CommandQueue::popCommand(uint8_t index) {
+    if (_mutex == NULL || xSemaphoreTake(_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Could not lock command queue");
+        return;
+    }
     if (_queueIsEmpty) {
         _l.logw("Queue is empty, no items popped");
+        xSemaphoreGive(_mutex);
         return;
     }
 
-    /* Shift items one to the left */
-    for (uint8_t i = index+1; i < MAX_QUEUE_ITEMS; i++) {
-        _commandQueue[i-1] = _commandQueue[i];
+    if (index >= _queuePointer) {
+        _l.logw("Command queue index out of range");
+        xSemaphoreGive(_mutex);
+        return;
     }
-    
-    _l.logi("Command deleted from command queue");
 
-    _queuePointer--;
-    
-    if (_queuePointer == 0) {
-        _queueIsEmpty = true;
-        _l.logi("No commands left in queue");
-    } else {
-        _l.logi("Number of commands to be executed [" + String(_queuePointer) + "]");
+    _popCommand(index);
+    xSemaphoreGive(_mutex);
+}
+
+/******************************************************************************/
+/*!
+  @brief    Atomically retrieves and removes the first queued command.
+  @param    command             Destination for the retrieved command
+  @returns  bool                True when a command was retrieved
+*/
+/******************************************************************************/
+bool CommandQueue::pullCommand(Command &command) {
+    if (_mutex == NULL || xSemaphoreTake(_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        _l.loge("Could not lock command queue");
+        return false;
     }
+    if (_queueIsEmpty) {
+        xSemaphoreGive(_mutex);
+        return false;
+    }
+
+    command = _commandQueue[0];
+    for (uint8_t i = 1; i < _queuePointer; i++) {
+        _commandQueue[i - 1] = _commandQueue[i];
+    }
+    _queuePointer--;
+    _queueIsEmpty = (_queuePointer == 0);
+    xSemaphoreGive(_mutex);
+    return true;
 }
 
 /******************************************************************************/
@@ -127,9 +197,26 @@ bool CommandQueue::_pushCommand(Command command, uint8_t index) {
     _commandQueue[index].parameter1 = command.parameter1;
     _commandQueue[index].parameter2 = command.parameter2;
     _commandQueue[index].parameter3 = command.parameter3;
-    _commandQueue[_queuePointer].parameterString1 = command.parameterString1;
+    _commandQueue[index].startMode = command.startMode;
+    _commandQueue[index].parameterString1 = command.parameterString1;
+    _commandQueue[index].modeParameters = command.modeParameters;
 
     return true;
+}
+
+/******************************************************************************/
+/*!
+  @brief    Removes a command while the caller owns the queue mutex.
+  @param    index               Index in command queue
+*/
+/******************************************************************************/
+void CommandQueue::_popCommand(uint8_t index) {
+    for (uint8_t i = index + 1; i < _queuePointer; i++) {
+        _commandQueue[i - 1] = _commandQueue[i];
+    }
+
+    _queuePointer--;
+    _queueIsEmpty = (_queuePointer == 0);
 }
 
 /******************************************************************************/
@@ -138,25 +225,21 @@ bool CommandQueue::_pushCommand(Command command, uint8_t index) {
 */
 /******************************************************************************/
 void CommandQueue::_cleanUp() {
-    uint8_t itemsRemoved = 0;
-    
-    for (uint8_t c1 = 0; c1 < _queuePointer; c1++) {
+    uint8_t c1 = 0;
+    while (c1 < _queuePointer) {
+        bool isRemoved = false;
         for (uint8_t c2 = c1+1; c2 < _queuePointer; c2++) {                     //c2 = c1+1 because that is the next item to compare
-            if (_commandQueue[c1].command == _commandQueue[c2].command) {
-                if (_commandQueue[c1].command != 255) {
-                    popCommand(c1);                                             //Pop c1 because it is overwritten by c2
-                    itemsRemoved++;
-                }
+            bool isSameCommand = _commandQueue[c1].command == _commandQueue[c2].command;
+            bool isSameConfiguration = _commandQueue[c1].command != COMMAND_CONFIGURE_MODE ||
+                                       _commandQueue[c1].parameter1 == _commandQueue[c2].parameter1;
+            if (isSameCommand && isSameConfiguration && _commandQueue[c1].command != 255) {
+                _popCommand(c1);                                                //Caller already owns the queue mutex
+                isRemoved = true;
+                break;
             }
         }
-    }
-
-    if (itemsRemoved > 0) {
-        _l.logi("[" + String(itemsRemoved) + "] duplicate items removed from command queue during cleanup");
-    }
-    
-    if (_queuePointer < itemsRemoved) {
-        _l.loge("More items removed than there are in the queue");
-        return;
+        if (!isRemoved) {
+            c1++;
+        }
     }
 }
