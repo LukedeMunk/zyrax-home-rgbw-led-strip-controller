@@ -188,4 +188,4 @@ When contributing to this repository, please read [CONTRIBUTING.md](CONTRIBUTING
 
 ## 10. Authors
 
-* **Luke de Munk** - Project maintainer - [Munk IT](munkservices.com) | [LinkedIn](https://www.linkedin.com/in/luke-de-munk/)
+* **Luke de Munk** - Project maintainer - [Munk IT](https://www.munkservices.com) | [LinkedIn](https://www.linkedin.com/in/luke-de-munk/)
