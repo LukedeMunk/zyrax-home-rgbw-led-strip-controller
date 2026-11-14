@@ -52,6 +52,7 @@
 #define CMD_GET_OTA_STATE               "/get_ota_state"
 #define CMD_GET_HOSTNAME                "/get_hostname"
 #define CMD_GET_STATES                  "/get_states"
+#define CMD_GET_CONFIGURATION           "/get_configuration"
 #define CMD_GET_MODE_CONFIGURATIONS     "/get_mode_configurations"
 
 /* Setters */
@@ -70,17 +71,15 @@
 #define CMD_GET_LOGS                    "/download_logs"
 #define CMD_DELETE_LOGS                 "/delete_logs"
 #define CMD_UPDATE_FIRMWARE             "/update_firmware"
-#define CMD_GET_CONFIGURATION           "/get_configuration"
-#define CMD_GET_LEDS                  "/get_leds"
-#define CMD_DRAW_LEDS                 "/draw_leds"
+#define CMD_GET_LEDS                    "/get_leds"
+#define CMD_DRAW_LEDS                   "/draw_leds"
 #define CMD_CONFIGURE_NETWORK           "/configure_network"
-
 
 /* Endpoint commands of master controller */
 #define MASTER_CMD_SET_OTA_STATE        "/set_ota_state"
 #define MASTER_CMD_DOWNLOAD_OTA_FILE    "/get_ota_file"
 #define MASTER_CMD_REQUEST_CONNECTION   "/ledstrip_request_connection"
-#define MASTER_CMD_SET_SENSOR_STATE            "/set_ledstrip_sensor_state"
+#define MASTER_CMD_SET_SENSOR_STATE     "/set_ledstrip_sensor_state"
 #pragma endregion
 
 #pragma region Filesystem
@@ -233,21 +232,21 @@ struct ModeParameters {
     CRGB color2 = CRGB(0, 0, 0);
     bool useGradient1 = false;
     bool useGradient2 = false;
-    uint8_t segmentSize = 2;
+    uint8_t segmentSize = 1;
     uint8_t tailLength = 0;
     uint8_t waveLength = 10;
-    uint16_t timeFade = 100;
-    uint16_t delay = 500;
-    uint16_t delayBetween = 100;
+    uint16_t timeFade = 0;
+    uint16_t delay = 100;
+    uint16_t delayBetween = 200;
     uint8_t randomnessDelay = 0;
-    uint8_t intensity = 0;
+    uint8_t intensity = 1;
     uint8_t direction = DIRECTION_LEFT;
-    uint8_t numberOfElements = 3;
-    uint8_t palette = PALETTE_YELLOW_RED;
-    uint8_t fadeLength = 0;
+    uint8_t numberOfElements = 5;
+    uint8_t palette = PALETTE_RANDOM;
+    uint8_t fadeLength = 10;
     uint8_t colorPosition = 0;                                                  //state
 };
-#define MAX_FADE_TIME 100
+#define MAX_FADE_TIME 1000
 #define MAX_WAVE_LENGTH 10
 
 /* LED task safety */

@@ -27,6 +27,7 @@
 #include "WiFi.h"                                                               //For WiFi functionality
 #include "ESPAsyncWebServer.h"                                                  //For HTTP commands
 #include "SPIFFS.h"                                                             //For file interaction with internal SPI Flash File System
+#include "Preferences.h"                                                        //For non-volatile memory functionality
 
 #include "Configuration.h"                                                      //For configuration variables and global constants
 #include "Logger.h"                                                             //For printing and saving logs
@@ -38,7 +39,7 @@ bool doorStateChanged = false;
 
 Ticker rebootDelay;
 
-AsyncWebServer server(80);
+AsyncWebServer server(HTTP_SERVER_PORT);
 AsyncWebSocket webSocket("/ws");
 Ledstrip strip;
 
@@ -88,7 +89,6 @@ void setup() {
     sensorInverted = nvMemory.getBool("sensorInverted", false);
     sensorModel = nvMemory.getUChar("sensorModel", SENSOR_MODEL_CONTACT_SWITCH);
     nvMemory.end();
-    l.logi("id: " + String(id));
 
     loadNetworkConfiguration();
 
@@ -190,6 +190,73 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
     }
 }*/
 
+
+#pragma region Routes
+/******************************************************************************/
+/*!
+  @brief    Routes for receiving data and commands by HTTP requests.
+*/
+/******************************************************************************/
+void createCommandRoutes() {
+    /* If in network configuration mode, load only configuration command and page */
+    if (bootMode == BOOT_MODE_NETWORK_CONFIGURATION) {
+        server.on("/", ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+            request->send(SPIFFS, "/templates/network_config.html", String());
+        });
+
+        /* CSS files */
+        server.serveStatic("/colors.css", SPIFFS, "/css/colors.css");
+        server.serveStatic("/base_web_styles.css", SPIFFS, "/css/base_web_styles.css");
+        server.serveStatic("/styles_mobile.css", SPIFFS, "/css/styles_mobile.css");
+
+        /* JavaScript files */
+        server.serveStatic("/jquery.min.js", SPIFFS, "/js/jquery.min.js");
+        server.serveStatic("/base_utilities.js", SPIFFS, "/js/base_utilities.js");
+        server.serveStatic("/network_config_page.js", SPIFFS, "/js/network_config_page.js");
+        
+        /* Images */
+        server.serveStatic("/favicon.ico", SPIFFS, "/images/favicon.ico");
+
+        server.on(CMD_CONFIGURE_NETWORK, ASYNC_HTTP_POST, configureNetwork);
+        return;
+    }
+
+    server.on(CMD_GET_HOSTNAME, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+        String resultString = "{\"hostname\":\"" + networkConfig.hostname + "\"}";
+        request->send(HTTP_CODE_OK, "text/javascript", resultString);
+    });
+    
+    server.on(CMD_GET_STATES, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(HTTP_CODE_OK, "text/javascript", generateStatesJSON());
+    });
+
+    server.on(CMD_GET_MODE_CONFIGURATIONS, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(HTTP_CODE_OK, "text/javascript", generateModeConfigurationJSON());
+    });
+
+    server.on(CMD_GET_CONFIGURATION, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(HTTP_CODE_OK, "text/javascript", generateConfigurationJSON());
+    });
+
+    server.on(CMD_GET_LEDS, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(HTTP_CODE_OK, "text/javascript", strip.getPixels());
+    });
+    
+    server.on(CMD_GET_LOGS, ASYNC_HTTP_GET, downloadLogs);
+    server.on(CMD_SET_CONFIGURATION, ASYNC_HTTP_POST, setConfiguration);
+    server.on(CMD_SET_POWER, ASYNC_HTTP_POST, setPower);
+    server.on(CMD_DRAW_LEDS, ASYNC_HTTP_POST, drawPixels);
+    server.on(CMD_SET_BRIGHTNESS, ASYNC_HTTP_POST, setBrightness);
+    server.on(CMD_SET_MODE, ASYNC_HTTP_POST, setMode);
+    server.on(CMD_CONFIGURE_MODE, ASYNC_HTTP_POST, configureMode);
+    server.on(CMD_UPDATE_FIRMWARE, ASYNC_HTTP_POST, updateFirmware);
+
+    server.on(CMD_REBOOT, ASYNC_HTTP_POST, [](AsyncWebServerRequest *request) {
+        request->send(HTTP_CODE_OK);
+        rebootDelay.once(1, rebootTicker);                                      //Reboot delay and return for HTTP to return response
+    });
+}
+#pragma endregion
 
 #pragma region Endpoint functions
 /******************************************************************************/
@@ -739,73 +806,6 @@ void resetNetworkConfigurationRequest(AsyncWebServerRequest *request) {
 }
 #pragma endregion
 
-#pragma region Routes
-/******************************************************************************/
-/*!
-  @brief    Routes for receiving data and commands by HTTP requests.
-*/
-/******************************************************************************/
-void createCommandRoutes() {
-    /* If in network configuration mode, load only configuration command and page */
-    if (bootMode == BOOT_MODE_NETWORK_CONFIGURATION) {
-        server.on("/", ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(SPIFFS, "/templates/network_config.html", String());
-        });
-
-        /* CSS files */
-        server.serveStatic("/colors.css", SPIFFS, "/css/colors.css");
-        server.serveStatic("/base_web_styles.css", SPIFFS, "/css/base_web_styles.css");
-        server.serveStatic("/styles_mobile.css", SPIFFS, "/css/styles_mobile.css");
-
-        /* JavaScript files */
-        server.serveStatic("/jquery.min.js", SPIFFS, "/js/jquery.min.js");
-        server.serveStatic("/base_utilities.js", SPIFFS, "/js/base_utilities.js");
-        server.serveStatic("/network_config_page.js", SPIFFS, "/js/network_config_page.js");
-        
-        /* Images */
-        server.serveStatic("/favicon.ico", SPIFFS, "/images/favicon.ico");
-
-        server.on(CMD_CONFIGURE_NETWORK, ASYNC_HTTP_POST, configureNetwork);
-        return;
-    }
-
-    server.on(CMD_GET_HOSTNAME, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-        String resultString = "{\"hostname\":\"" + networkConfig.hostname + "\"}";
-        request->send(HTTP_CODE_OK, "text/javascript", resultString);
-    });
-    
-    server.on(CMD_GET_STATES, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(HTTP_CODE_OK, "text/javascript", generateStatesJSON());
-    });
-
-    server.on(CMD_GET_MODE_CONFIGURATIONS, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(HTTP_CODE_OK, "text/javascript", generateModeConfigurationJSON());
-    });
-
-    server.on(CMD_GET_CONFIGURATION, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(HTTP_CODE_OK, "text/javascript", generateConfigurationJSON());
-    });
-
-    server.on(CMD_GET_LEDS, ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(HTTP_CODE_OK, "text/javascript", strip.getPixels());
-    });
-    
-    server.on(CMD_GET_LOGS, ASYNC_HTTP_GET, downloadLogs);
-    server.on(CMD_SET_CONFIGURATION, ASYNC_HTTP_POST, setConfiguration);
-    server.on(CMD_SET_POWER, ASYNC_HTTP_POST, setPower);
-    server.on(CMD_DRAW_LEDS, ASYNC_HTTP_POST, drawPixels);
-    server.on(CMD_SET_BRIGHTNESS, ASYNC_HTTP_POST, setBrightness);
-    server.on(CMD_SET_MODE, ASYNC_HTTP_POST, setMode);
-    server.on(CMD_CONFIGURE_MODE, ASYNC_HTTP_POST, configureMode);
-    server.on(CMD_UPDATE_FIRMWARE, ASYNC_HTTP_POST, updateFirmware);
-
-    server.on(CMD_REBOOT, ASYNC_HTTP_POST, [](AsyncWebServerRequest *request) {
-        request->send(HTTP_CODE_OK);
-        rebootDelay.once(1, rebootTicker);                                      //Reboot delay and return for HTTP to return response
-    });
-}
-#pragma endregion
-
 #pragma region General Utilities
 /******************************************************************************/
 /*!
@@ -927,6 +927,7 @@ String generateStatesJSON() {
 String generateConfigurationJSON() {
     String idString = "\"id\":" + String(id);
     String hostname = "\"hostname\":\"" + networkConfig.hostname + "\"";
+    String ipString = "\"ip\":\"" + String(WiFi.localIP().toString()) + "\"";
     String numberOfLeds = "\"number_of_leds\":" + (String) strip.getNumberOfLeds();
     String driver = "\"model_id\":" + String(strip.getDriver());
     String powerAnimation = "\"power_animation\":" + String(strip.getPowerAnimation());
@@ -937,6 +938,7 @@ String generateConfigurationJSON() {
 
     String jsonString = "{" + idString;
     jsonString += ", " + hostname;
+    jsonString += ", " + ipString;
     jsonString += ", " + driver;
     jsonString += ", " + numberOfLeds;
     jsonString += ", " + powerAnimation;

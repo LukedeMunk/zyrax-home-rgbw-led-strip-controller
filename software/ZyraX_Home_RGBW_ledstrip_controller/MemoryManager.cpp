@@ -93,18 +93,18 @@ ModeParameters MemoryManager::loadModeParameters(uint8_t mode) {
     parameters.color2 = _stringToCRGB(_nvMemory.getString(String("color2_" + modeString).c_str(), "(0,0,0)"));
     parameters.useGradient1 = _nvMemory.getBool(String("useGradient1_" + modeString).c_str(), false);
     parameters.useGradient2 = _nvMemory.getBool(String("useGradient2_" + modeString).c_str(), false);
-    parameters.segmentSize = _nvMemory.getUChar(String("segmentSize_" + modeString).c_str(), 2);
+    parameters.segmentSize = _nvMemory.getUChar(String("segmentSize_" + modeString).c_str(), 1);
     parameters.tailLength = _nvMemory.getUChar(String("tailLength_" + modeString).c_str(), 0);
     parameters.waveLength = _nvMemory.getUChar(String("waveLength_" + modeString).c_str(), 10);
-    parameters.timeFade = _nvMemory.getUShort(String("timeFade_" + modeString).c_str(), 100);
-    parameters.delay = _nvMemory.getUShort(String("delay_" + modeString).c_str(), 500);
-    parameters.delayBetween = _nvMemory.getUShort(String("delayBetween_" + modeString).c_str(), 100);
+    parameters.timeFade = _nvMemory.getUShort(String("timeFade_" + modeString).c_str(), 0);
+    parameters.delay = _nvMemory.getUShort(String("delay_" + modeString).c_str(), 100);
+    parameters.delayBetween = _nvMemory.getUShort(String("delayBetween_" + modeString).c_str(), 200);
     parameters.randomnessDelay = _nvMemory.getUChar(String("randomDelay_" + modeString).c_str(), 0);
     parameters.intensity = _nvMemory.getUShort(String("intensity_" + modeString).c_str(), 1);
     parameters.direction = _nvMemory.getUShort(String("direction_" + modeString).c_str(), DIRECTION_LEFT);
-    parameters.numberOfElements = _nvMemory.getUShort(String("numElems_" + modeString).c_str(), 1);
+    parameters.numberOfElements = _nvMemory.getUShort(String("numElems_" + modeString).c_str(), 5);
     parameters.palette = _nvMemory.getUShort(String("palette_" + modeString).c_str(), PALETTE_RANDOM);
-    parameters.fadeLength = _nvMemory.getUShort(String("fadeLength_" + modeString).c_str(), 100);
+    parameters.fadeLength = _nvMemory.getUShort(String("fadeLength_" + modeString).c_str(), 10);
 
     _nvMemory.end();
 

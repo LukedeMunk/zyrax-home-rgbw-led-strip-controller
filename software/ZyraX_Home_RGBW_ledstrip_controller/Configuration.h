@@ -16,7 +16,8 @@
 
 #define FIRMWARE_VERSION                "v0.9.0"
 
-#define MASTER_SERVER_ADDRESS           "https://mastercontroller.local"
+#define HTTP_SERVER_PORT                80
+#define MASTER_SERVER_ADDRESS           "https://mastercontroller.home"
 //#define MASTER_SERVER_ADDRESS           "http://192.168.2.37:5000"              //TODO_IN_PRODUCTION: Remove
 
 #define DEBOUNCE_TIME                   1000
