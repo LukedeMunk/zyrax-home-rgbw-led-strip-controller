@@ -98,18 +98,10 @@ void setup() {
 
     strip.initialize();
 
-    if (bootMode == BOOT_MODE_NETWORK_CONFIGURATION) {
-        Command command;
-        command.command = COMMAND_SET_MODE;
-        command.parameter1 = SYSTEM_MODE_PULSES;
-        commandQueue.pushCommand(command);
-        command.command = COMMAND_SET_POWER;
-        command.parameter1 = 1;
-        commandQueue.pushCommand(command);
-    } else {
-        if (strip.getMode() == SYSTEM_MODE_PULSES) {
-            strip.setMode(MODE_COLOR);
-        }
+    if (strip.getMode() == SYSTEM_MODE_PULSES) {
+        strip.setMode(MODE_COLOR);
+    }
+    if (bootMode != BOOT_MODE_NETWORK_CONFIGURATION) {
         updateManager.initialize(id);
     }
 
@@ -137,7 +129,6 @@ void setup() {
         l.logfe("Could not create command task");
     }
 }
-
 
 /******************************************************************************/
 /*!
@@ -167,29 +158,6 @@ void loop() {
         checkSensor();
     }
 }
-/*
-void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
-                        AwsEventType type, void *arg,
-                        uint8_t *data, size_t len) {
-    if (type == WS_EVT_CONNECT) {
-        Serial.printf("Client %u connected\n", client->id());
-        client->text("Hallo van ESP32-S3!");
-        const CRGB* leds = strip.getPixelColors();
-        client->binary((uint8_t*)leds, strip.getNumberOfLeds() * 3); // 3 bytes per LED
-    } 
-    else if (type == WS_EVT_DISCONNECT) {
-        Serial.printf("Client %u disconnected\n", client->id());
-    } 
-    else if (type == WS_EVT_DATA) {
-        AwsFrameInfo *info = (AwsFrameInfo*)arg;
-        if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-            String msg = String((char*)data).substring(0, len);
-            Serial.printf("Ontvangen van client %u: %s\n", client->id(), msg.c_str());
-            client->text("Ontvangen: " + msg); // stuur antwoord terug
-        }
-    }
-}*/
-
 
 #pragma region Routes
 /******************************************************************************/
@@ -198,23 +166,15 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 */
 /******************************************************************************/
 void createCommandRoutes() {
-    /* If in network configuration mode, load only configuration command and page */
+    server.on(CMD_SET_POWER, ASYNC_HTTP_POST, setPower);
     if (bootMode == BOOT_MODE_NETWORK_CONFIGURATION) {
         server.on("/", ASYNC_HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(SPIFFS, "/templates/network_config.html", String());
+            request->send(SPIFFS, "/templates/strip.html", String());
         });
 
-        /* CSS files */
-        server.serveStatic("/colors.css", SPIFFS, "/css/colors.css");
-        server.serveStatic("/base_web_styles.css", SPIFFS, "/css/base_web_styles.css");
-        server.serveStatic("/styles_mobile.css", SPIFFS, "/css/styles_mobile.css");
-
-        /* JavaScript files */
-        server.serveStatic("/jquery.min.js", SPIFFS, "/js/jquery.min.js");
-        server.serveStatic("/base_utilities.js", SPIFFS, "/js/base_utilities.js");
-        server.serveStatic("/network_config_page.js", SPIFFS, "/js/network_config_page.js");
-        
-        /* Images */
+        server.serveStatic("/strip.css", SPIFFS, "/css/strip.css");
+        server.serveStatic("/strip.js", SPIFFS, "/js/strip.js");
+        server.serveStatic("/language_pack_en.js", SPIFFS, "/templates/language_pack_en.js");
         server.serveStatic("/favicon.ico", SPIFFS, "/images/favicon.ico");
 
         server.on(CMD_CONFIGURE_NETWORK, ASYNC_HTTP_POST, configureNetwork);
@@ -244,7 +204,6 @@ void createCommandRoutes() {
     
     server.on(CMD_GET_LOGS, ASYNC_HTTP_GET, downloadLogs);
     server.on(CMD_SET_CONFIGURATION, ASYNC_HTTP_POST, setConfiguration);
-    server.on(CMD_SET_POWER, ASYNC_HTTP_POST, setPower);
     server.on(CMD_DRAW_LEDS, ASYNC_HTTP_POST, drawPixels);
     server.on(CMD_SET_BRIGHTNESS, ASYNC_HTTP_POST, setBrightness);
     server.on(CMD_SET_MODE, ASYNC_HTTP_POST, setMode);
@@ -932,6 +891,7 @@ String generateConfigurationJSON() {
     String driver = "\"model_id\":" + String(strip.getDriver());
     String powerAnimation = "\"power_animation\":" + String(strip.getPowerAnimation());
     String firmwareVersion = "\"firmware_version\":\"" + String(FIRMWARE_VERSION) + "\"";
+    String apiVersion = "\"api_version\":\"" + String(API_VERSION) + "\"";
     String sensorEnabledStr = "\"has_sensor\":" + String(sensorEnabled);
     String sensorInvertedStr = "\"sensor_inverted\":" + String(sensorInverted);
     String sensorModelStr = "\"sensor_model\":" + String(sensorModel);
@@ -943,6 +903,7 @@ String generateConfigurationJSON() {
     jsonString += ", " + numberOfLeds;
     jsonString += ", " + powerAnimation;
     jsonString += ", " + firmwareVersion;
+    jsonString += ", " + apiVersion;
     jsonString += ", " + sensorEnabledStr;
     jsonString += ", " + sensorInvertedStr;
     jsonString += ", " + sensorModelStr + "}";
@@ -1256,7 +1217,7 @@ void initializeWifi() {
     uint8_t baseMac[6];
     esp_read_mac(baseMac, ESP_MAC_WIFI_STA);
     String uniqueApId = String(baseMac[0], HEX) + String(baseMac[2], HEX) + String(baseMac[4], HEX);
-    String configNetworkApSsid = NETWORK_CONFIG_AP_SSID + uniqueApId;
+    String configNetworkApSsid = AP_PREFIX + uniqueApId;
 
     /* If network is not initialized, start as access point */
     if (networkConfig.ssid == "") {
@@ -1270,7 +1231,7 @@ void initializeWifi() {
     if (networkConfig.hostname != "") {
         WiFi.setHostname(networkConfig.hostname.c_str());
     } else {
-        String tempHostname = String("zyrax_") + uniqueApId;
+        String tempHostname = String(AP_HOSTNAME_PREFIX) + uniqueApId;
         WiFi.setHostname(tempHostname.c_str());
         l.logw("Hostname not configured");
     }

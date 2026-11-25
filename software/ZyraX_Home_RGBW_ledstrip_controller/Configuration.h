@@ -15,10 +15,11 @@
 #include "Globals.h"                                                            //Global variables and constants
 
 #define FIRMWARE_VERSION                "v0.9.0"
+#define DEFAULT_HOSTNAME                "zyrax-strip"
 
 #define HTTP_SERVER_PORT                80
 #define MASTER_SERVER_ADDRESS           "https://mastercontroller.home"
-//#define MASTER_SERVER_ADDRESS           "http://192.168.2.37:5000"              //TODO_IN_PRODUCTION: Remove
+//#define MASTER_SERVER_ADDRESS           "http://192.168.2.103:5000"              //TODO_IN_PRODUCTION: Remove
 
 #define DEBOUNCE_TIME                   1000
 
@@ -35,8 +36,9 @@
 #define MAX_NUMBER_LEDS                 250
 
 /* Network credentials */
-#define NETWORK_CONFIG_AP_SSID          "Config network ESP32_"
-#define AP_PASSWORD                     "NetworkConfig!"
+#define AP_PREFIX                       "ZyraX LEDs "
+#define AP_HOSTNAME_PREFIX              "zyrax"
+#define AP_PASSWORD                     "ConfigureZyraX!"
 #define CONNECTION_TIMEOUT              500
 #define WIFI_POLL_TIME                  30                                      //Interval of WiFi checks (s)
 #define WIFI_TRY_CONNECT_TIMEOUT        20                                      //For when the controller tries to connect to a new configured network (s)

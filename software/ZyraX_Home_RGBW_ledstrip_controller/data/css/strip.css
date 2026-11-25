@@ -1,0 +1,121 @@
+/******************************************************************************/
+/*
+ * File:    strip.css
+ * Version: 0.10.0
+ * Author:  Luke de Munk
+ * 
+ * Brief:   Styles for the web UI.
+ * 
+ *          More information:
+ *          https://github.com/LukedeMunk/zyrax-home-rgbw-led-strip-controller
+ */
+/******************************************************************************/
+:root {
+    font-family: Inter, system-ui, sans-serif;
+    color-scheme: dark;
+    color: #e7edf7;
+    background: #0a101b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at top right, #173353, transparent 40%);
+}
+
+main {
+  max-width: 40rem;
+  margin: auto;
+  padding: 2rem 1.25rem;
+}
+
+header span {
+  color: #58c7ff;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0.25rem 0 1.5rem;
+  font-size: clamp(2rem, 6vw, 2.7rem);
+}
+
+h2 {
+  margin: 0 0 1rem;
+}
+
+section,
+details {
+  margin-bottom: 1rem;
+  padding: 1.25rem;
+  background: #101827;
+  border: 1px solid #2e4157;
+  border-radius: 1rem;
+}
+
+summary,
+button {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+form,
+label {
+  display: grid;
+  gap: 0.5rem;
+}
+
+form {
+  margin-top: 1.25rem;
+  gap: 1rem;
+}
+
+input,
+button {
+  font: inherit;
+  padding: 0.7rem 1rem;
+  border-radius: 0.5rem;
+}
+
+input {
+  min-width: 0;
+  border: 1px solid #465972;
+  background: #0a101b;
+  color: inherit;
+}
+
+button {
+  border: 0;
+  background: #58c7ff;
+  color: #101827;
+}
+
+button:disabled {
+  opacity: 0.6;
+}
+
+#power-controls {
+  display: flex;
+  gap: 0.6rem;
+}
+
+#power-controls button {
+  min-width: 5rem;
+}
+
+#power-controls button[value="0"] {
+  background: #263348;
+  color: inherit;
+}
+
+p {
+  margin-bottom: 0;
+}
+
+p:empty {
+  margin: 0;
+}
+
