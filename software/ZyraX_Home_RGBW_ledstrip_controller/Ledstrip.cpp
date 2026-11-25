@@ -562,12 +562,16 @@ void Ledstrip::__gradient() {
         
         _showLeds();
         _delayMode(_modeParameters[MODE_GRADIENT].delay);
-        _modeParameters[MODE_GRADIENT].colorPosition += direction;
-        
-        if (_modeParameters[MODE_GRADIENT].colorPosition > _modeParameters[MODE_GRADIENT].maxColorPos) {
-            direction = -1;
-        } else if (_modeParameters[MODE_GRADIENT].colorPosition < _modeParameters[MODE_GRADIENT].minColorPos) {
-            direction = 1;
+        auto& parameters = _modeParameters[MODE_GRADIENT];
+        if (parameters.minColorPos == 0 && parameters.maxColorPos == 255) {
+            ++parameters.colorPosition;
+        } else if (parameters.minColorPos >= parameters.maxColorPos) {
+            parameters.colorPosition = parameters.minColorPos;
+        } else {
+            parameters.colorPosition = constrain(parameters.colorPosition, parameters.minColorPos, parameters.maxColorPos);
+            if (parameters.colorPosition == parameters.maxColorPos) direction = -1;
+            if (parameters.colorPosition == parameters.minColorPos) direction = 1;
+            parameters.colorPosition += direction;
         }
     }
 }
@@ -2862,26 +2866,20 @@ CRGB Ledstrip::_getHeatColor(uint8_t temperature, uint8_t palette) {
 */
 /******************************************************************************/
 uint8_t Ledstrip::_getGradientColorPosition(uint16_t step) {
-    uint8_t colorMultiplier = MAX_WAVE_LENGTH+1 - _modeParameters[MODE_GRADIENT].waveLength;
-    uint8_t range = _modeParameters[MODE_GRADIENT].maxColorPos - _modeParameters[MODE_GRADIENT].minColorPos;
-    if (range == 0) return _modeParameters[MODE_GRADIENT].minColorPos;
+    const auto& parameters = _modeParameters[MODE_GRADIENT];
+    const int32_t range = parameters.maxColorPos - parameters.minColorPos;
+    if (range <= 0) return parameters.minColorPos;
 
-    uint8_t colorPosition = (step * colorMultiplier + _modeParameters[MODE_GRADIENT].colorPosition) & 255;
+    const int32_t stride = MAX_WAVE_LENGTH + 1 - parameters.waveLength;
+    const int32_t position = parameters.colorPosition + step * stride;
+    if (range == 255) return static_cast<uint8_t>(position);
 
-    if (colorPosition < _modeParameters[MODE_GRADIENT].minColorPos) {
-        uint8_t diff = _modeParameters[MODE_GRADIENT].minColorPos - colorPosition;
-        colorPosition = _modeParameters[MODE_GRADIENT].minColorPos + (diff % (2 * range));
-        if (colorPosition > _modeParameters[MODE_GRADIENT].maxColorPos) {
-            colorPosition = _modeParameters[MODE_GRADIENT].maxColorPos - (colorPosition - _modeParameters[MODE_GRADIENT].maxColorPos);
-        }
-    } else if (colorPosition > _modeParameters[MODE_GRADIENT].maxColorPos) {
-        uint8_t diff = colorPosition - _modeParameters[MODE_GRADIENT].maxColorPos;
-        colorPosition = _modeParameters[MODE_GRADIENT].maxColorPos - (diff % (2 * range));
-        if (colorPosition < _modeParameters[MODE_GRADIENT].minColorPos) {
-            colorPosition = _modeParameters[MODE_GRADIENT].minColorPos + (_modeParameters[MODE_GRADIENT].minColorPos - colorPosition);
-        }
-    }
-    return colorPosition;
+    // Reflect the strip position at both limits before narrowing to a wheel index.
+    const int32_t period = 2 * range;
+    int32_t offset = (position - parameters.minColorPos) % period;
+    if (offset < 0) offset += period;
+    if (offset > range) offset = period - offset;
+    return static_cast<uint8_t>(parameters.minColorPos + offset);
 }
 #pragma endregion
 
