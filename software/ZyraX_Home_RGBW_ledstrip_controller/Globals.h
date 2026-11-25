@@ -48,38 +48,40 @@
 #pragma endregion
 
 #pragma region Endpoints
+#define API_VERSION                     "v1"
+#define API_URL_PREFIX                  "/api/" API_VERSION
+#define MASTER_API_URL_PREFIX           "/api/v1"
+
 /* Getters */
-#define CMD_GET_OTA_STATE               "/get_ota_state"
-#define CMD_GET_HOSTNAME                "/get_hostname"
-#define CMD_GET_STATES                  "/get_states"
-#define CMD_GET_CONFIGURATION           "/get_configuration"
-#define CMD_GET_MODE_CONFIGURATIONS     "/get_mode_configurations"
+#define CMD_GET_OTA_STATE               API_URL_PREFIX "/get_ota_state"
+#define CMD_GET_HOSTNAME                API_URL_PREFIX "/get_hostname"
+#define CMD_GET_STATES                  API_URL_PREFIX "/get_states"
+#define CMD_GET_CONFIGURATION           API_URL_PREFIX "/get_configuration"
+#define CMD_GET_MODE_CONFIGURATIONS     API_URL_PREFIX "/get_mode_configurations"
 
 /* Setters */
-#define CMD_SET_POWER                   "/set_power"
-#define CMD_SET_BRIGHTNESS              "/set_brightness"
-#define CMD_SET_MODE                    "/set_mode"
-#define CMD_SET_CONFIGURATION           "/set_configuration"
+#define CMD_SET_POWER                   API_URL_PREFIX "/set_power"
+#define CMD_SET_BRIGHTNESS              API_URL_PREFIX "/set_brightness"
+#define CMD_SET_MODE                    API_URL_PREFIX "/set_mode"
+#define CMD_SET_CONFIGURATION           API_URL_PREFIX "/set_configuration"
 
 /* Utility commands */
-#define CMD_SET_INSTALLATION_MODE       "/set_installation_mode"
-#define CMD_REBOOT  	        	    "/reboot"
-#define CMD_RESET_SD                    "/reset_sd"
-#define CMD_RESET_NETWORK_CONFIGURATION "/reset_network_configuration"
-#define CMD_CONFIGURE_MODE              "/configure_mode"
-#define CMD_REBOOT                      "/reboot"
-#define CMD_GET_LOGS                    "/download_logs"
-#define CMD_DELETE_LOGS                 "/delete_logs"
-#define CMD_UPDATE_FIRMWARE             "/update_firmware"
-#define CMD_GET_LEDS                    "/get_leds"
-#define CMD_DRAW_LEDS                   "/draw_leds"
-#define CMD_CONFIGURE_NETWORK           "/configure_network"
+#define CMD_REBOOT  	        	    API_URL_PREFIX "/reboot"
+#define CMD_RESET_SD                    API_URL_PREFIX "/reset_sd"
+#define CMD_RESET_NETWORK_CONFIGURATION API_URL_PREFIX "/reset_network_configuration"
+#define CMD_CONFIGURE_MODE              API_URL_PREFIX "/configure_mode"
+#define CMD_REBOOT                      API_URL_PREFIX "/reboot"
+#define CMD_GET_LOGS                    API_URL_PREFIX "/download_logs"
+#define CMD_UPDATE_FIRMWARE             API_URL_PREFIX "/update_firmware"
+#define CMD_GET_LEDS                    API_URL_PREFIX "/get_leds"
+#define CMD_DRAW_LEDS                   API_URL_PREFIX "/draw_leds"
+#define CMD_CONFIGURE_NETWORK           API_URL_PREFIX "/configure_network"
 
-/* Endpoint commands of master controller */
-#define MASTER_CMD_SET_OTA_STATE        "/set_ota_state"
-#define MASTER_CMD_DOWNLOAD_OTA_FILE    "/get_ota_file"
-#define MASTER_CMD_REQUEST_CONNECTION   "/ledstrip_request_connection"
-#define MASTER_CMD_SET_SENSOR_STATE     "/set_ledstrip_sensor_state"
+/* Endpoint commands to the master controller */
+#define MASTER_CMD_SET_OTA_STATE        MASTER_API_URL_PREFIX "/device/set_ota_state"
+#define MASTER_CMD_DOWNLOAD_OTA_FILE    MASTER_API_URL_PREFIX "/device/download_firmware_file"
+#define MASTER_CMD_REQUEST_CONNECTION   MASTER_API_URL_PREFIX "/device/connect"
+#define MASTER_CMD_SET_SENSOR_STATE     MASTER_API_URL_PREFIX "/device/ledstrip/set_ledstrip_sensor_state"
 #pragma endregion
 
 #pragma region Filesystem
@@ -177,7 +179,6 @@
 #define _READY_TO_RUN                   8
 #define _LOOPING                        9
 #define _WAIT_FOR_DOOR_CLOSED           10
-
 
 #define PARAMETER_ID_COLOR_RANGE        1
 #define PARAMETER_ID_COLOR1             2
